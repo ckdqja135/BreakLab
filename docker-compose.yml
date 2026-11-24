@@ -1,0 +1,62 @@
+# A와 B는 같은 네트워크에 있지 않다. A가 B에 닿는 길은 Toxiproxy뿐이다.
+# 관리 서버는 양쪽 네트워크에 직접 연결되어 실험 구간 장애의 영향을 받지 않는다.
+name: breaklab
+
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    command: ["-host", "0.0.0.0", "-port", "8474"]
+    environment:
+      TOXIPROXY_AUTH_TOKEN: ${TOXIPROXY_AUTH_TOKEN:?.env 파일에 TOXIPROXY_AUTH_TOKEN을 설정하세요}
+    networks: [a-side, b-side]
+    restart: unless-stopped
+
+  labd:
+    build: .
+    command: ["/bin/labd"]
+    environment:
+      LISTEN: 0.0.0.0:7700
+      TELEMETRY_LISTEN: 0.0.0.0:7701
+      LAB_DB: /data/lab.db
+      LAB_WEB_DIR: /web
+      TOXIPROXY_URL: http://toxiproxy:8474
+      TOXIPROXY_AUTH_TOKEN: ${TOXIPROXY_AUTH_TOKEN}
+      PROXY_LISTEN: 0.0.0.0:7721
+      PROXY_UPSTREAM: service-b:7720
+      A_URL: http://service-a:7710
+      A_HEALTH_URL: http://service-a:7710/healthz
+      B_HEALTH_URL: http://service-b:7720/healthz
+    ports: ["127.0.0.1:7700:7700"]
+    volumes: ["lab-data:/data"]
+    networks: [a-side, b-side, front]
+    depends_on: [toxiproxy]
+    restart: unless-stopped
+
+  service-a:
+    build: .
+    command: ["/bin/service-a"]
+    environment:
+      LISTEN: 0.0.0.0:7710
+      B_URL: http://toxiproxy:7721
+      LAB_TELEMETRY_URL: http://labd:7701
+    networks: [a-side]
+    depends_on: [labd]
+    restart: unless-stopped
+
+  service-b:
+    build: .
+    command: ["/bin/service-b"]
+    environment:
+      LISTEN: 0.0.0.0:7720
+      LAB_TELEMETRY_URL: http://labd:7701
+    networks: [b-side]
+    depends_on: [labd]
+    restart: unless-stopped
+
+networks:
+  a-side: { internal: true }
+  b-side: { internal: true }
+  front: {}
+
+volumes:
+  lab-data:
