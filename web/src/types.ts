@@ -52,7 +52,7 @@ export interface ServiceStatus {
 export interface Gauge { label: string; value: string; alert?: boolean }
 export interface ProxyState { reachable: boolean; enabled: boolean; toxics: string[] | null; checkedUs: number; error?: string }
 export interface TopoNode { id: string; name: string; role: string; addr: string; faults?: boolean; slots?: number }
-export interface Place { id: string; col: number; row: number }
+export interface Place { id: string; col: number; row: number; span?: number }
 export interface Scenario { id: string; name: string; about: string; nodes: Place[]; edges: string[] }
 export interface Edge { id: string; from: string; to: string; protocol: string; proxy?: { name: string; listen: string; upstream: string; edges: string[] } }
 export interface LabEvent { id: number; runId: string; atUs: number; type: string; detail: string }

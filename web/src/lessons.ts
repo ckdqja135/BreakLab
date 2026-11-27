@@ -64,9 +64,11 @@ const rerun = (settings: Partial<Settings>, what: string, why: string): Step => 
   done: renewed,
 })
 
+// 같은 대상에 이 과정과 다른 장애가 걸려 있으면 먼저 지우게 한다.
+const other = (c: Ctx, f: FaultInput) => c.live.faults.some((x) => x.edge === f.edge && x.node === f.node && x.type !== f.type && !['removed', 'apply_failed'].includes(x.state))
 const apply = (f: FaultInput, values: string, why: string): Step => ({
-  do: (c) => (picked(c, f) ? `오른쪽에 ${values} 값을 채워 두었습니다. 보라색 '장애 적용'을 누르세요.` : where(f)),
-  hint: (c) => (picked(c, f) ? 'apply' : spot(f)),
+  do: (c) => (!picked(c, f) ? where(f) : other(c, f) ? "이 과정과 다른 장애가 걸려 있습니다. 오른쪽 '장애 제거'를 누르세요." : `오른쪽에 ${values} 값을 채워 두었습니다. 보라색 '장애 적용'을 누르세요.`),
+  hint: (c) => (!picked(c, f) ? spot(f) : other(c, f) ? 'remove' : 'apply'),
   why, fault: f,
   done: (c) => active(c, f),
 })
@@ -215,7 +217,8 @@ const rush: Burst = { count: 15, intervalMs: 100, concurrency: 5 }
 const cacheState = (t: Trace) => t.spans.find((s) => s.service === 'service-a' && s.kind === 'server')?.attrs?.['lab.cache']
 const payTries = (t: Trace) => attempts(t, 'a-pay').length
 const unsent = (ts: Trace[]) => ts.filter((t) => queued(t) && !notified(t)).length
-const sentAt = (t: Trace) => Math.max(0, ...attempts(t, 'queue-worker').filter((a) => a.call.result === 'ok').map((a) => a.call.endUs - t.startUs))
+// 작업자가 알림을 다 보낸 시각. 주문한 때부터 잰다.
+const sentAt = (t: Trace) => Math.max(0, ...t.spans.filter((s) => s.service === 'worker' && s.kind === 'server' && s.result === 'ok').map((s) => s.endUs - t.startUs))
 
 LESSONS.push(
   {
@@ -422,3 +425,30 @@ LESSONS.push(
     ],
   },
 )
+
+const ms = (t: Trace, edge: string) => { const a = attempts(t, edge)[0]; return a ? human(a.call.endUs - a.call.startUs) : '-' }
+
+LESSONS.push({
+  id: 'spread', topic: 'shop', title: '한 곳의 장애가 번지는 길', goal: '여러 서비스를 거치는 주문에서 장애가 어디까지 번지는지 봅니다.', settings: { maxAttempts: 2, backoffMs: 200 },
+  steps: [
+    begin,
+    send((t) => t.result === 'ok' && notified(t), '주문 한 건이 인증, 재고, 결제를 차례로 거치고, 알림은 큐를 통해 나중에 나갑니다. 그림에서 점이 지나가는 순서를 보세요.',
+      (t) => `주문은 ${took(t)} 걸렸습니다. 인증에 ${ms(t, 'a-auth')}, 재고에 ${ms(t, 'a-b')}, 결제에 ${ms(t, 'a-pay')}를 썼고, 알림은 주문 ${human(sentAt(t))} 뒤에 나갔습니다.`),
+    apply(slowPay, '지연 1500ms, 응답 방향', '순서의 맨 끝에 있는 결제사만 느려지게 합니다. 인증과 재고는 건드리지 않습니다.'),
+    many({ count: 8, intervalMs: 200, concurrency: 4 }, '손님 8명을 보냅니다. 요청이 어디까지 가는지 보세요.', (ts) => {
+      const paid = ts.reduce((n, t) => n + charges(t), 0)
+      return `결제 하나만 느려졌는데 손님 ${ts.length}명 중 ${ts.filter(bad).length}명이 실패했습니다. 인증은 ${calls(ts, 'a-auth')}번, 재고는 ${calls(ts, 'a-b')}번 제대로 일했지만 모두 헛일이 됐습니다. 결제는 ${paid}번 됐고, 알림은 ${ts.filter(notified).length}건 나갔습니다.`
+    }, slowPay),
+    read("아래 '손님 화면'에서 실패한 손님을 눌러 풀이를 읽어 보세요.", '뒤쪽 서비스 하나의 장애가 앞쪽 서비스들이 한 일을 헛수고로 만들고, 손님에게는 전체 실패로 보입니다. 순서의 끝에 있을수록 버려지는 일이 많습니다.', 'tab-impact'),
+    remove(slowPay, '이번에는 다른 곳을 죽여 봅니다.'),
+    apply(cutWorker, '연결 차단', '이번에는 작업자를 죽입니다. 결제와 똑같이 서비스 하나가 죽는 것입니다.'),
+    many({ count: 8, intervalMs: 200, concurrency: 4 }, '같은 손님 8명을 보냅니다.',
+      (ts) => `이번에는 손님 ${ts.length}명 중 ${ts.filter((t) => t.result === 'ok').length}명이 주문에 성공했습니다. 알림 ${unsent(ts)}건만 큐에 쌓였습니다. 똑같이 서비스 하나가 죽었는데 손님이 겪는 일은 정반대입니다.`, cutWorker),
+    remove(cutWorker, '작업자를 되살립니다.'),
+  ],
+  learned: [
+    '요청이 답을 직접 기다리는 서비스가 죽으면 그 요청도 죽습니다. 큐 뒤에 있는 서비스가 죽으면 손님은 모릅니다.',
+    '그래서 지금 꼭 끝내야 하는 일과 나중에 해도 되는 일을 나누는 것이 설계의 시작입니다.',
+    '한 요청이 거치는 서비스가 많을수록, 그중 하나만 죽어도 실패할 가능성이 커집니다.',
+  ],
+})

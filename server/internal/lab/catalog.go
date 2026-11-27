@@ -73,6 +73,11 @@ var scenarios = []scenarioDef{
 	{Scenario: model.Scenario{ID: "queue", Name: "큐와 작업자", About: "재고를 확인한 뒤 알림 작업을 큐에 넣고 바로 답합니다. 알림은 작업자가 나중에 보냅니다.",
 		Nodes: []model.Place{{ID: generatorID, Col: 0, Row: 1}, {ID: hubID, Col: 1, Row: 1}, {ID: "service-b", Col: 2, Row: 1}, {ID: "queue", Col: 1, Row: 0}, {ID: "worker", Col: 2, Row: 0}},
 		Edges: []string{"gen-a", "a-b", "a-queue", "queue-worker"}}, path: order, flow: "stock,notify"},
+	// 서비스가 많아 네 칸 세 줄에 놓는다. A는 가운데 줄의 두 칸을 차지한다.
+	{Scenario: model.Scenario{ID: "shop", Name: "전체 쇼핑몰", About: "주문 한 건이 인증, 재고, 결제를 차례로 거치고, 알림은 큐를 통해 나중에 나갑니다.",
+		Nodes: []model.Place{{ID: generatorID, Col: 0, Row: 1}, {ID: hubID, Col: 1, Row: 1, Span: 2}, {ID: "auth", Col: 1, Row: 0}, {ID: "pay", Col: 2, Row: 0},
+			{ID: "service-b", Col: 3, Row: 1}, {ID: "queue", Col: 1, Row: 2}, {ID: "worker", Col: 2, Row: 2}},
+		Edges: []string{"gen-a", "a-auth", "a-b", "a-pay", "a-queue", "queue-worker"}}, path: order, flow: "auth,stock,pay,notify"},
 }
 
 func scenario(id string) *scenarioDef {

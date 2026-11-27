@@ -179,7 +179,7 @@ function FaultControl(p: Props & { target: Target }) {
     if (v.slots) setSlots(v.slots)
     if (v.workMs) setWork(v.workMs)
     setTtl(v.ttlSec)
-  }, [p.preset])
+  }, [p.preset, node, edge])
   const { limits } = p.live
   const over = ['removed', 'apply_failed']
   const cur = p.live.faults.find((f) => mine(f) && !over.includes(f.state))

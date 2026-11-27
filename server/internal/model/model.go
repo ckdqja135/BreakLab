@@ -254,9 +254,10 @@ type Edge struct {
 
 // Place는 주제 화면에서 서비스가 놓일 자리다.
 type Place struct {
-	ID  string `json:"id"`
-	Col int    `json:"col"`
-	Row int    `json:"row"`
+	ID   string `json:"id"`
+	Col  int    `json:"col"`
+	Row  int    `json:"row"`
+	Span int    `json:"span,omitempty"` // 가로로 여러 칸을 차지할 때의 칸 수
 }
 
 // Scenario는 실험 주제다. 주제마다 쓰는 서비스와 연결이 다르다.

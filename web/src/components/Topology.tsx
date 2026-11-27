@@ -7,30 +7,42 @@ import type { Edge, Fault, LabState, Scenario, Selection, ServiceStatus, Span, T
 
 // 자리: 가로 세 칸, 세로 두 줄. 가운데 줄(row 1)에 요청이 지나가고, 윗줄(row 0)에는 A가 따로 부르는 서비스가 놓인다.
 const COL = [{ x: 40, w: 168 }, { x: 372, w: 176 }, { x: 792, w: 176 }]
+// 서비스가 많은 주제는 네 칸 세 줄에 촘촘히 놓고, 연결에 붙는 글자를 줄인다.
+const DENSE = { col: [{ x: 24, w: 150 }, { x: 270, w: 150 }, { x: 570, w: 150 }, { x: 920, w: 150 }], y: [118, 288, 470], width: 1110, height: 538 }
 const H = 104
 const LANE = 11
 
+interface Line { v: boolean; a: number; b: number; at: number } // 가로면 at이 y, 세로면 at이 x. a는 출발 쪽, b는 도착 쪽
 interface Geo {
+  width: number
   height: number
-  box: Record<string, { x: number; w: number; y: number }> // y는 상자 가운데
-  line: Record<string, { v: boolean; a: number; b: number; at: number }> // 가로면 at이 y, 세로면 at이 x
+  dense: boolean
+  box: Record<string, { x: number; w: number; y: number; row: number; col: number }> // y는 상자 가운데
+  line: Record<string, Line>
 }
 
 export function layout(sc: Scenario, edges: Edge[]): Geo {
+  const dense = sc.nodes.some((n) => n.col > 2 || n.row > 1 || (n.span ?? 1) > 1)
   const tall = sc.nodes.some((n) => n.row === 0)
-  const Y = tall ? [160, 410] : [0, 205]
+  const cols = dense ? DENSE.col : COL
+  const Y = dense ? DENSE.y : tall ? [160, 410] : [0, 205]
   const box: Geo['box'] = {}
-  for (const n of sc.nodes) box[n.id] = { ...COL[n.col], y: Y[n.row] }
+  for (const n of sc.nodes) {
+    const last = cols[n.col + (n.span ?? 1) - 1]
+    box[n.id] = { x: cols[n.col].x, w: last.x + last.w - cols[n.col].x, y: Y[n.row], row: n.row, col: n.col }
+  }
   const line: Geo['line'] = {}
   for (const id of sc.edges) {
     const e = edges.find((x) => x.id === id)
     const f = e && box[e.from], t = e && box[e.to]
     if (!f || !t) continue
-    line[id] = f.x === t.x
-      ? { v: true, a: f.y - H / 2, b: t.y + H / 2, at: f.x + f.w / 2 } // 아래 상자의 위에서 위 상자의 아래로
-      : { v: false, a: f.x + f.w, b: t.x, at: f.y }
+    if (f.y === t.y) { line[id] = { v: false, a: f.x + f.w, b: t.x, at: f.y }; continue }
+    // 세로 연결은 좁은 쪽 상자의 가운데에 세운다. 넓은 A에서 여러 갈래가 나갈 수 있다.
+    const narrow = f.w <= t.w ? f : t
+    const up = t.y < f.y
+    line[id] = { v: true, a: f.y + (up ? -H / 2 : H / 2), b: t.y + (up ? H / 2 : -H / 2), at: narrow.x + narrow.w / 2 }
   }
-  return { height: tall ? 530 : 410, box, line }
+  return { width: dense ? DENSE.width : 1008, height: dense ? DENSE.height : tall ? 530 : 410, dense, box, line }
 }
 
 // place는 연결 위의 한 점이다. pos 0은 출발 서비스, 1은 도착 서비스.
@@ -91,11 +103,11 @@ export function Topology(p: Props) {
   const nodes = p.state.topology.nodes.filter((n) => g.box[n.id])
   const edges = p.state.topology.edges.filter((e) => g.line[e.id])
   return (
-    <svg className="topo" viewBox={`0 0 1008 ${g.height}`} role="group" aria-label="서비스 토폴로지">
+    <svg className="topo" viewBox={`0 0 ${g.width} ${g.height}`} role="group" aria-label="서비스 토폴로지">
       <defs>
         <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z" fill="context-stroke" /></marker>
       </defs>
-      <Ruler h={g.height} />
+      <Ruler w={g.width} h={g.height} />
       {edges.map((e) => {
         const l = g.line[e.id]
         const st = edgeStat(p.traces, e.id)
@@ -113,27 +125,55 @@ export function Topology(p: Props) {
         const took = st.last ? ms(st.last.endUs - st.last.startUs) : '측정 없음'
         const count = st.last ? `최근 ${resultLabel[st.last.result].text}, 성공 ${st.ok} 실패 ${st.fail}` : st.inFlight ? `진행 중 ${st.inFlight}` : ''
         const common = { className: `edge ${sel ? 'sel' : ''} ${dim ? 'dim' : ''}`, role: 'button', tabIndex: 0, 'aria-label': `연결 ${meta(e.from).name}에서 ${meta(e.to).name}`, onClick: pick, onKeyDown: key(pick) }
+        const tag = fault && <><text className="t-fault">{tagText(fault)}</text><text className="t-fault2" dy="17">{tagState(fault, !p.past, p.nowUs)}</text></>
         if (l.v) {
           const x = l.at
-          // 세로 연결은 글자와 장애 표시를 모두 왼쪽에 둔다. 오른쪽은 가운데 줄 연결의 장애 표시 자리다.
+          const s = Math.sign(l.b - l.a) // 위로 가면 -1, 아래로 가면 1
+          // 세로 연결은 글자와 장애 표시를 왼쪽에 둔다. 오른쪽은 가운데 줄 연결의 장애 표시 자리다.
           return (
             <g key={e.id} {...common}>
-              <rect className="hit" x={x - 196} y={l.b + 2} width={236} height={l.a - l.b - 4} rx="4" />
-              <path className={cls('request')} d={`M${x - LANE} ${l.a}V${mid + gap}`} /><path className={cls('request')} d={`M${x - LANE} ${mid - gap}V${l.b + 3}`} markerEnd="url(#arr)" />
-              <path className={cls('response')} d={`M${x + LANE} ${l.b}V${mid - gap}`} /><path className={cls('response')} d={`M${x + LANE} ${mid + gap}V${l.a - 3}`} markerEnd="url(#arr)" />
+              <rect className="hit" x={x - (g.dense ? 40 : 196)} y={Math.min(l.a, l.b) + 2} width={g.dense ? 80 : 236} height={Math.abs(l.a - l.b) - 4} rx="4" />
+              <path className={cls('request')} d={`M${x - LANE} ${l.a}V${mid - s * gap}`} /><path className={cls('request')} d={`M${x - LANE} ${mid + s * gap}V${l.b - s * 3}`} markerEnd="url(#arr)" />
+              <path className={cls('response')} d={`M${x + LANE} ${l.b}V${mid + s * gap}`} /><path className={cls('response')} d={`M${x + LANE} ${mid - s * gap}V${l.a + s * 3}`} markerEnd="url(#arr)" />
               <g className={`valve ${fault ? 'on' : ''}`} data-c={e.id}>
                 <path d={`M${x - 24} ${mid - 15} L${x + 24} ${mid + 15} H${x - 24} L${x + 24} ${mid - 15} Z`} />
-                <text x={x + 30} y={mid + 28} className="t-small left">프록시</text>
+                {!g.dense && <text x={x + 30} y={mid + 28} className="t-small left">프록시</text>}
               </g>
-              <text x={x - 34} y={mid + 2} className="t-label right">{e.protocol} <tspan className="t-dimv">{took}</tspan></text>
-              <text x={x - 34} y={mid + 18} className={`t-small right ${st.last?.route === 'bypassed' ? 'alert' : ''}`}>{route}</text>
-              <text x={x - 34} y={mid + 33} className="t-small right">{count}</text>
-              {fault && (
+              {g.dense ? <text x={x + 32} y={mid + 5} className="t-dim left">{took}</text> : <>
+                <text x={x - 34} y={mid + 2} className="t-label right">{e.protocol} <tspan className="t-dimv">{took}</tspan></text>
+                <text x={x - 34} y={mid + 18} className={`t-small right ${st.last?.route === 'bypassed' ? 'alert' : ''}`}>{route}</text>
+                <text x={x - 34} y={mid + 33} className="t-small right">{count}</text>
+              </>}
+              {fault && (g.dense ? (
+                <g className="faulttag">
+                  <path d={`M${x - 34} ${mid}H${x - 24}`} />
+                  <rect x={x - 242} y={mid - 22} width="208" height="44" rx="3" />
+                  <g transform={`translate(${x - 138} ${mid - 4})`}>{tag}</g>
+                </g>
+              ) : (
                 <g className="faulttag">
                   <path d={`M${x - 34} ${mid - 36}L${x - 24} ${mid - 16}`} />
                   <rect x={x - 242} y={mid - 66} width="208" height="44" rx="3" />
-                  <text x={x - 138} y={mid - 48} className="t-fault">{tagText(fault)}</text>
-                  <text x={x - 138} y={mid - 31} className="t-fault2">{tagState(fault, !p.past, p.nowUs)}</text>
+                  <g transform={`translate(${x - 138} ${mid - 48})`}>{tag}</g>
+                </g>
+              ))}
+            </g>
+          )
+        }
+        if (g.dense) {
+          const [x1, x2, Y] = [l.a, l.b, l.at]
+          return (
+            <g key={e.id} {...common}>
+              <rect className="hit" x={x1 + 2} y={Y - 34} width={x2 - x1 - 4} height={84} rx="4" />
+              <path className={cls('request')} d={`M${x1} ${Y - LANE}H${mid - gap}`} /><path className={cls('request')} d={`M${mid + gap} ${Y - LANE}H${x2 - 3}`} markerEnd="url(#arr)" />
+              <path className={cls('response')} d={`M${x2} ${Y + LANE}H${mid + gap}`} /><path className={cls('response')} d={`M${mid - gap} ${Y + LANE}H${x1 + 3}`} markerEnd="url(#arr)" />
+              {e.proxy && <g className={`valve ${fault ? 'on' : ''}`} data-c={e.id}><path d={`M${mid - 15} ${Y - 24} L${mid + 15} ${Y + 24} V${Y - 24} L${mid - 15} ${Y + 24} Z`} /></g>}
+              <text x={mid} y={Y + 44} className="t-dim">{took}</text>
+              {fault && (
+                <g className="faulttag">
+                  <path d={`M${mid} ${Y - 26}V${Y - 56}`} />
+                  <rect x={mid - 104} y={Y - 100} width="208" height="44" rx="3" />
+                  <g transform={`translate(${mid} ${Y - 82})`}>{tag}</g>
                 </g>
               )}
             </g>
@@ -209,14 +249,21 @@ export function Topology(p: Props) {
             {busy > 0 && (queued > 0
               ? <g className="busy queued"><rect x={b.x + b.w - 112} y={Y - H / 2 - 12} width="104" height="22" rx="3" /><text x={b.x + b.w - 60} y={Y - H / 2 + 3}>처리 {busy - queued}, 줄 {queued}</text></g>
               : <g className="busy"><rect x={b.x + b.w - 70} y={Y - H / 2 - 12} width="62" height="22" rx="3" /><text x={b.x + b.w - 39} y={Y - H / 2 + 3}>처리 중 {busy}</text></g>)}
-            {fault && (
-              <g className="faulttag">
-                <path d={`M${cx - 60} ${Y - H / 2}V${Y - H / 2 - 20}`} />
-                <rect x={cx - 104} y={Y - H / 2 - 64} width="208" height="44" rx="3" />
-                <text x={cx} y={Y - H / 2 - 46} className="t-fault">{tagText(fault)}</text>
-                <text x={cx} y={Y - H / 2 - 29} className="t-fault2">{tagState(fault, !p.past, p.nowUs)}</text>
-              </g>
-            )}
+            {fault && (() => {
+              // 장애 표시를 둘 자리. 보통은 상자 위, 촘촘한 배치에서는 줄에 따라 아래나 옆의 빈 곳이다.
+              const [tx, ty, link] = !g.dense || b.row === 0 ? [cx - 104, Y - H / 2 - 64, `M${cx - 60} ${Y - H / 2}V${Y - H / 2 - 20}`]
+                : b.row === 1 ? [cx - 104, Y + H / 2 + 20, `M${cx} ${Y + H / 2}V${Y + H / 2 + 20}`]
+                : b.col <= 1 ? [b.x - 228, Y - 22, `M${b.x} ${Y}H${b.x - 20}`]
+                : [b.x + b.w + 20, Y - 22, `M${b.x + b.w} ${Y}H${b.x + b.w + 20}`]
+              return (
+                <g className="faulttag">
+                  <path d={link as string} />
+                  <rect x={tx} y={ty} width="208" height="44" rx="3" />
+                  <text x={(tx as number) + 104} y={(ty as number) + 18} className="t-fault">{tagText(fault)}</text>
+                  <text x={(tx as number) + 104} y={(ty as number) + 35} className="t-fault2">{tagState(fault, !p.past, p.nowUs)}</text>
+                </g>
+              )
+            })()}
           </g>
         )
       })}
@@ -243,10 +290,10 @@ function NodeStatus({ svc, x, y, live }: { svc: ServiceStatus; x: number; y: num
   )
 }
 
-function Ruler({ h }: { h: number }) {
-  const xs = Array.from({ length: 21 }, (_, i) => 4 + i * 50)
+function Ruler({ w, h }: { w: number; h: number }) {
+  const xs = Array.from({ length: Math.floor((w - 8) / 50) + 1 }, (_, i) => 4 + i * 50)
   const ys = Array.from({ length: Math.floor((h - 8) / 50) + 1 }, (_, i) => 4 + i * 50)
-  return <path className="ruler" d={`M4 4H1004 M4 4V${h - 6} ${xs.map((x, i) => `M${x} 4v${i % 4 ? 5 : 9}`).join(' ')} ${ys.map((y, i) => `M4 ${y}h${i % 4 ? 5 : 9}`).join(' ')}`} />
+  return <path className="ruler" d={`M4 4H${w - 4} M4 4V${h - 6} ${xs.map((x, i) => `M${x} 4v${i % 4 ? 5 : 9}`).join(' ')} ${ys.map((y, i) => `M4 ${y}h${i % 4 ? 5 : 9}`).join(' ')}`} />
 }
 
 const MAX_TOKENS = 40
@@ -299,7 +346,7 @@ function Tokens(p: Props & { geo: Geo }) {
           </g>
         )
       })}
-      {shown.length > MAX_TOKENS && <text x="500" y={p.geo.height - 12} className="t-small">표시 한도를 넘은 요청 {shown.length - MAX_TOKENS}개는 그리지 않음</text>}
+      {shown.length > MAX_TOKENS && <text x={p.geo.width / 2} y={p.geo.height - 12} className="t-small">표시 한도를 넘은 요청 {shown.length - MAX_TOKENS}개는 그리지 않음</text>}
     </g>
   )
 }
