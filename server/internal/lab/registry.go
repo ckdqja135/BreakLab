@@ -16,11 +16,12 @@ import (
 // registry는 요청별 span을 모으고 관측 상태를 판정한다.
 // 데이터가 없다는 사실을 성공이나 실패로 바꾸지 않는다.
 type registry struct {
-	mu        sync.Mutex
-	recs      map[string]*rec
-	proxyPort string
-	grace     time.Duration
-	dropped   int64
+	mu      sync.Mutex
+	recs    map[string]*rec
+	edges   []model.Edge
+	ports   map[string]string // 연결 ID별 프록시 포트. 프록시가 없는 연결은 빠져 있다
+	grace   time.Duration
+	dropped int64
 }
 
 type rec struct {
@@ -31,9 +32,14 @@ type rec struct {
 	waiting  bool
 }
 
-func newRegistry(proxyListen string, grace time.Duration) *registry {
-	_, port, _ := net.SplitHostPort(proxyListen)
-	return &registry{recs: map[string]*rec{}, proxyPort: port, grace: grace}
+func newRegistry(edges []model.Edge, grace time.Duration) *registry {
+	r := &registry{recs: map[string]*rec{}, edges: edges, ports: map[string]string{}, grace: grace}
+	for _, e := range edges {
+		if e.Proxy != nil {
+			_, r.ports[e.ID], _ = net.SplitHostPort(e.Proxy.Listen)
+		}
+	}
+	return r
 }
 
 func (r *registry) begin(t model.Trace, root model.Span) {
@@ -152,7 +158,7 @@ func (r *registry) evaluate(rc *rec, faults []model.Fault, expired bool) {
 	}
 	for _, s := range rc.spans {
 		if s.Kind == "client" {
-			s.Edge = edgeOf(s)
+			s.Edge = r.edgeOf(s)
 			var peer *model.Span
 			for _, c := range children[s.SpanID] {
 				if c.Kind == "server" {
@@ -161,22 +167,22 @@ func (r *registry) evaluate(rc *rec, faults []model.Fault, expired bool) {
 			}
 			s.Peer = r.peerState(s, peer, expired)
 			s.Route = r.route(s, peer)
-			s.FaultIDs = faultsFor(s, faults)
+			s.FaultIDs = r.faultsFor(s, faults)
 			switch s.Peer {
 			case "waiting":
 				pending = true
 			case "missing":
 				missing = true
-				notes = append(notes, "응답은 받았지만 도착 서비스의 span이 없음: "+edgeName(s.Edge))
+				notes = append(notes, "응답은 받았지만 도착 서비스의 span이 없음: "+r.edgeName(s.Edge))
 			case "undetermined":
 				unknown = true
-				notes = append(notes, "도착 서비스가 요청을 받았는지 판단할 수 없음: "+edgeName(s.Edge))
+				notes = append(notes, "도착 서비스가 요청을 받았는지 판단할 수 없음: "+r.edgeName(s.Edge))
 			}
 			if peer != nil && s.StartUs-peer.StartUs > 5000 {
 				notes = append(notes, "서비스 간 시계 차이가 있어 구간 시간이 정확하지 않을 수 있음")
 			}
 			if peer != nil && s.EndUs > 0 && peer.StartUs > s.EndUs {
-				notes = append(notes, "호출자가 포기한 뒤 도착 서비스가 요청을 받음: "+edgeName(s.Edge))
+				notes = append(notes, "호출자가 포기한 뒤 도착 서비스가 요청을 받음: "+r.edgeName(s.Edge))
 			}
 		}
 		if s.Kind == "server" && s.EndUs > 0 && s.Attrs["lab.attempts"] != "" {
@@ -212,15 +218,24 @@ func (r *registry) evaluate(rc *rec, faults []model.Fault, expired bool) {
 	}
 }
 
-func edgeName(id string) string {
-	if id == injectableEdge {
-		return "Service A에서 Service B"
+func (r *registry) edge(id string) *model.Edge {
+	for i := range r.edges {
+		if r.edges[i].ID == id {
+			return &r.edges[i]
+		}
 	}
-	return "요청 발생기에서 Service A"
+	return nil
 }
 
-func edgeOf(s *model.Span) string {
-	for _, e := range edges {
+func (r *registry) edgeName(id string) string {
+	if e := r.edge(id); e != nil {
+		return nodeName(e.From) + "에서 " + nodeName(e.To)
+	}
+	return id
+}
+
+func (r *registry) edgeOf(s *model.Span) string {
+	for _, e := range r.edges {
 		if e.From == s.Service && e.To == s.Attrs["peer.service"] {
 			return e.ID
 		}
@@ -244,14 +259,15 @@ func (r *registry) peerState(s, peer *model.Span, expired bool) string {
 	return "undetermined"
 }
 
-// route는 A와 B 양쪽이 기록한 실제 연결 주소로 프록시 통과 여부를 판정한다.
+// route는 호출한 쪽과 받은 쪽이 기록한 실제 연결 주소로 프록시 통과 여부를 판정한다.
 func (r *registry) route(s, peer *model.Span) string {
-	if s.Edge != injectableEdge {
+	proxyPort := r.ports[s.Edge]
+	if proxyPort == "" {
 		return "direct"
 	}
 	remote, local := s.Attrs["lab.conn.remote"], s.Attrs["lab.conn.local"]
 	if remote == "" {
-		if s.EndUs > 0 && s.Attrs["server.port"] == r.proxyPort {
+		if s.EndUs > 0 && s.Attrs["server.port"] == proxyPort {
 			return "proxy_dial" // 프록시 주소로 연결을 시도했지만 연결되지 않았다.
 		}
 		if s.EndUs > 0 && s.Attrs["server.port"] != "" {
@@ -260,7 +276,7 @@ func (r *registry) route(s, peer *model.Span) string {
 		return "undetermined"
 	}
 	_, port, _ := net.SplitHostPort(remote)
-	if port != r.proxyPort {
+	if port != proxyPort {
 		return "bypassed"
 	}
 	if peer == nil {
@@ -273,21 +289,22 @@ func (r *registry) route(s, peer *model.Span) string {
 }
 
 // faultsFor는 이 호출이 겪은 장애를 고른다. 연결 장애는 프록시를 실제로 지난 호출만,
-// 서비스 장애는 요청에 그 장애 ID가 실려 있던 호출만 해당한다.
-func faultsFor(s *model.Span, faults []model.Fault) []string {
-	var ids []string
-	if s.Edge != injectableEdge {
+// 서비스 장애는 그 서비스를 부르면서 요청에 장애 ID가 실려 있던 호출만 해당한다.
+func (r *registry) faultsFor(s *model.Span, faults []model.Fault) []string {
+	e := r.edge(s.Edge)
+	if e == nil {
 		return nil
 	}
+	var ids []string
 	carried := strings.Split(s.Attrs["lab.fault_ids"], ",")
 	for _, f := range faults {
 		if f.Node != "" {
-			if slices.Contains(carried, f.ID) {
+			if f.Node == e.To && slices.Contains(carried, f.ID) {
 				ids = append(ids, f.ID)
 			}
 			continue
 		}
-		if s.Route == "bypassed" || s.Route == "undetermined" {
+		if e.Proxy == nil || s.Route == "bypassed" || s.Route == "undetermined" {
 			continue
 		}
 		if f.Edge != s.Edge || f.AppliedUs == 0 || (s.EndUs > 0 && f.AppliedUs > s.EndUs) || (f.RemovedUs > 0 && f.RemovedUs < s.StartUs) {

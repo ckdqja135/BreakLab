@@ -14,7 +14,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 export interface StopResult { cleanup: Cleanup; canceled: number }
 
 export const api = {
-  startRun: (label: string, settings: Settings, limitSec: number) => call<Run>('POST', '/api/runs', { label, settings, limitSec }),
+  startRun: (label: string, scenario: string, settings: Settings, limitSec: number) => call<Run>('POST', '/api/runs', { label, scenario, settings, limitSec }),
   endRun: () => call<StopResult>('POST', '/api/runs/end'),
   emergency: () => call<StopResult>('POST', '/api/emergency-stop'),
   send: () => call<{ seq: number; traceId: string }>('POST', '/api/requests'),

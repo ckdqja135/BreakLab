@@ -1,38 +1,48 @@
 // 손님 화면: 실제 요청 하나를 주문하는 손님 한 명으로 보여 준다. 숫자는 모두 관측값이며 만들어 내지 않는다.
 import { Ban, CircleCheck, CircleX, Lightbulb, ListTree, LoaderCircle, UserRound } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { story, waited } from '../explain'
+import { charges, notified, queued, story, waited } from '../explain'
 import { Badge, faultText, human, resultLabel } from '../format'
-import type { Fault, Run, Trace } from '../types'
+import type { Fault, Run, Scenario, Trace } from '../types'
 
-interface Props { traces: Trace[]; faults: Fault[]; run: Run | null; nowUs: number; live: boolean; focusId: string | null; onFocus: (id: string | null) => void; onOpen: (id: string) => void }
+interface Props { traces: Trace[]; faults: Fault[]; run: Run | null; scenario: Scenario; nowUs: number; live: boolean; focusId: string | null; onFocus: (id: string | null) => void; onOpen: (id: string) => void }
 
 const failed = (t: Trace) => t.endUs > 0 && t.result !== 'ok' && t.result !== 'canceled'
 
-export function Impact({ traces, faults, run, nowUs, live, focusId, onFocus, onOpen }: Props) {
+export function Impact({ traces, faults, run, scenario, nowUs, live, focusId, onFocus, onOpen }: Props) {
   if (!traces.length) return <div className="empty">아직 손님이 없습니다. 실험을 시작하고 요청을 보내면, 요청 하나가 주문하는 손님 한 명으로 나타납니다.</div>
   const shown = traces.find((t) => t.traceId === focusId) ?? [...traces].reverse().find((t) => t.endUs > 0) ?? traces[traces.length - 1]
   return (
     <div className="impact">
-      <Crowd traces={traces} nowUs={nowUs} pickedId={shown.traceId} onFocus={onFocus} />
+      <Crowd traces={traces} scenario={scenario} nowUs={nowUs} pickedId={shown.traceId} onFocus={onFocus} />
       <Incident traces={traces} faults={faults} run={run} nowUs={nowUs} live={live} pickedId={shown.traceId} onFocus={onFocus} />
       <Told t={shown} nowUs={nowUs} onOpen={onOpen} />
     </div>
   )
 }
 
-function Crowd({ traces, nowUs, pickedId, onFocus }: { traces: Trace[]; nowUs: number; pickedId: string; onFocus: (id: string) => void }) {
+function Crowd({ traces, scenario, nowUs, pickedId, onFocus }: { traces: Trace[]; scenario: Scenario; nowUs: number; pickedId: string; onFocus: (id: string) => void }) {
   const done = traces.filter((t) => t.endUs > 0 && t.result !== 'canceled')
   const bad = done.filter(failed).length
   const waiting = traces.filter((t) => t.result === 'running').length
   const times = done.map((t) => t.endUs - t.startUs)
+  const has = (id: string) => scenario.nodes.some((n) => n.id === id)
+  const good = done.length - bad
+  // 손님 눈에는 보이지 않는 피해. 모두 관측된 span에서 센다.
+  const paid = traces.reduce((n, t) => n + charges(t), 0)
+  const unsent = traces.filter((t) => queued(t) && !notified(t)).length
+  const verb = has('cache') ? '조회' : '주문'
   return (
     <section className="crowd" aria-label="손님">
       <div className="tiles">
         <div className={waiting ? 'tile tone-live' : 'tile'}><b>{waiting}</b><span>대기 중</span></div>
-        <div className="tile tone-ok"><b>{done.length - bad}</b><span>주문 완료</span></div>
-        <div className={bad ? 'tile tone-bad' : 'tile'}><b>{bad}</b><span>주문 실패</span></div>
+        <div className="tile tone-ok"><b>{good}</b><span>{verb} 완료</span></div>
+        <div className={bad ? 'tile tone-bad' : 'tile'}><b>{bad}</b><span>{verb} 실패</span></div>
+        {has('pay') && <div className={paid > good ? 'tile tone-bad' : 'tile tone-ok'}><b>{paid}</b><span>실제 결제</span></div>}
+        {has('queue') && <div className={unsent ? 'tile tone-bad' : 'tile'}><b>{unsent}</b><span>알림 밀림</span></div>}
       </div>
+      {has('pay') && paid > good && <p className="hidden-harm">완료된 주문은 {good}건인데 결제는 {paid}번 됐습니다. 손님 화면에는 보이지 않는 피해입니다.</p>}
+      {has('queue') && unsent > 0 && <p className="hidden-harm">주문은 끝났지만 알림을 아직 못 받은 손님이 {unsent}명입니다. 손님 화면에는 보이지 않는 피해입니다.</p>}
       <p className="note">
         {done.length ? `손님 ${done.length}명이 평균 ${human(times.reduce((a, b) => a + b, 0) / times.length)} 기다렸고, 가장 오래 기다린 손님은 ${human(Math.max(...times))}입니다.` : '첫 손님이 기다리는 중입니다.'}
       </p>
@@ -97,7 +107,7 @@ function Incident({ traces, faults, run, nowUs, live, pickedId, onFocus }: { tra
           {[0, 0.5, 1].map((r) => (
             <g key={r}>
               <path className="gl" d={`M${m.l} ${y(top * r)}H${W - m.r}`} />
-              <text className="ax" x={m.l - 6} y={y(top * r) + 4} textAnchor="end">{r === 0 ? '0' : human(top * r)}</text>
+              <text className="ax" x={m.l - 6} y={y(top * r) + 4} textAnchor="end">{r === 0 ? '0' : `${+((top * r) / 1e6).toFixed(2)}초`}</text>
             </g>
           ))}
           {Array.from({ length: Math.floor(secs / step) + 1 }, (_, i) => i * step).map((s) => (
@@ -113,7 +123,7 @@ function Incident({ traces, faults, run, nowUs, live, pickedId, onFocus }: { tra
               </g>
             )
           })}
-          {limit <= top && <g><path className="limit" d={`M${m.l} ${y(limit)}H${W - m.r}`} /><text className="ax halo" x={m.l + 4} y={y(limit) - 4}>A가 B를 기다리는 한도 {human(limit)}</text></g>}
+          {limit <= top && <g><path className="limit" d={`M${m.l} ${y(limit)}H${W - m.r}`} /><text className="ax halo" x={m.l + 4} y={y(limit) - 4}>A가 다른 서비스를 기다리는 한도 {human(limit)}</text></g>}
           {traces.map((t) => {
             const run = t.result === 'running'
             const tone = run ? 'live' : t.result === 'ok' ? 'ok' : t.result === 'canceled' ? 'mute' : 'bad'
@@ -146,6 +156,7 @@ function Told({ t, nowUs, onOpen }: { t: Trace; nowUs: number; onOpen: (id: stri
         {s.lines.map((l, i) => <li key={i} className={`tone-${l.tone}`}><time className="mono">{clockOf(t.startUs, l.atUs)}</time><span>{l.text}</span></li>)}
       </ol>
       <p className={`verdict tone-${s.verdict.tone}`}>{s.verdict.text}</p>
+      {s.after.length > 0 && <><h4>손님이 답을 받은 뒤</h4><ol>{s.after.map((l, i) => <li key={i} className={`tone-${l.tone}`}><time className="mono">{clockOf(t.startUs, l.atUs)}</time><span>{l.text}</span></li>)}</ol></>}
       {s.insights.map((x) => <p key={x} className="insight"><Lightbulb size={15} aria-hidden /><span>{x}</span></p>)}
       <button onClick={() => onOpen(t.traceId)}><ListTree size={14} aria-hidden />타임라인으로 보기</button>
     </section>

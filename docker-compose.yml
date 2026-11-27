@@ -1,6 +1,15 @@
-# A와 B는 같은 네트워크에 있지 않다. A가 B에 닿는 길은 Toxiproxy뿐이다.
-# 관리 서버는 양쪽 네트워크에 직접 연결되어 실험 구간 장애의 영향을 받지 않는다.
+# A는 다른 서비스와 같은 네트워크에 있지 않다. A가 다른 서비스에 닿는 길은 Toxiproxy뿐이다.
+# 큐와 작업자 사이도 마찬가지다.
+# 관리 서버는 모든 네트워크에 직접 연결되어 실험 구간 장애의 영향을 받지 않는다.
 name: breaklab
+
+# A가 부르는 서비스들. 같은 실행 파일을 ROLE만 바꿔 띄운다.
+x-service: &service
+  build: .
+  command: ["/bin/service"]
+  networks: [b-side]
+  depends_on: [labd]
+  restart: unless-stopped
 
 services:
   toxiproxy:
@@ -8,7 +17,7 @@ services:
     command: ["-host", "0.0.0.0", "-port", "8474"]
     environment:
       TOXIPROXY_AUTH_TOKEN: ${TOXIPROXY_AUTH_TOKEN:?.env 파일에 TOXIPROXY_AUTH_TOKEN을 설정하세요}
-    networks: [a-side, b-side]
+    networks: [a-side, b-side, c-side]
     restart: unless-stopped
 
   labd:
@@ -21,14 +30,32 @@ services:
       LAB_WEB_DIR: /web
       TOXIPROXY_URL: http://toxiproxy:8474
       TOXIPROXY_AUTH_TOKEN: ${TOXIPROXY_AUTH_TOKEN}
-      PROXY_LISTEN: 0.0.0.0:7721
-      PROXY_UPSTREAM: service-b:7720
       A_URL: http://service-a:7710
-      A_HEALTH_URL: http://service-a:7710/healthz
-      B_HEALTH_URL: http://service-b:7720/healthz
+      # 서비스마다 관리 경로 주소와, 그 앞에 놓인 프록시의 수신 주소와 도착 주소
+      B_BASE: http://service-b:7720
+      PROXY_B_LISTEN: 0.0.0.0:7721
+      PROXY_B_UPSTREAM: service-b:7720
+      AUTH_BASE: http://auth:7730
+      PROXY_AUTH_LISTEN: 0.0.0.0:7731
+      PROXY_AUTH_UPSTREAM: auth:7730
+      PAY_BASE: http://pay:7740
+      PROXY_PAY_LISTEN: 0.0.0.0:7741
+      PROXY_PAY_UPSTREAM: pay:7740
+      CACHE_BASE: http://cache:7750
+      PROXY_CACHE_LISTEN: 0.0.0.0:7751
+      PROXY_CACHE_UPSTREAM: cache:7750
+      DB_BASE: http://db:7760
+      PROXY_DB_LISTEN: 0.0.0.0:7761
+      PROXY_DB_UPSTREAM: db:7760
+      QUEUE_BASE: http://queue:7770
+      PROXY_QUEUE_LISTEN: 0.0.0.0:7771
+      PROXY_QUEUE_UPSTREAM: queue:7770
+      WORKER_BASE: http://worker:7790
+      PROXY_WORKER_LISTEN: 0.0.0.0:7791
+      PROXY_WORKER_UPSTREAM: worker:7790
     ports: ["127.0.0.1:7700:7700"]
     volumes: ["lab-data:/data"]
-    networks: [a-side, b-side, front]
+    networks: [a-side, b-side, c-side, front]
     depends_on: [toxiproxy]
     restart: unless-stopped
 
@@ -38,24 +65,49 @@ services:
     environment:
       LISTEN: 0.0.0.0:7710
       B_URL: http://toxiproxy:7721
+      AUTH_URL: http://toxiproxy:7731
+      PAY_URL: http://toxiproxy:7741
+      CACHE_URL: http://toxiproxy:7751
+      DB_URL: http://toxiproxy:7761
+      QUEUE_URL: http://toxiproxy:7771
       LAB_TELEMETRY_URL: http://labd:7701
     networks: [a-side]
     depends_on: [labd]
     restart: unless-stopped
 
   service-b:
-    build: .
-    command: ["/bin/service-b"]
-    environment:
-      LISTEN: 0.0.0.0:7720
-      LAB_TELEMETRY_URL: http://labd:7701
-    networks: [b-side]
-    depends_on: [labd]
-    restart: unless-stopped
+    <<: *service
+    environment: { ROLE: stock, LISTEN: "0.0.0.0:7720", LAB_TELEMETRY_URL: "http://labd:7701" }
+
+  auth:
+    <<: *service
+    environment: { ROLE: auth, LISTEN: "0.0.0.0:7730", LAB_TELEMETRY_URL: "http://labd:7701" }
+
+  pay:
+    <<: *service
+    environment: { ROLE: pay, LISTEN: "0.0.0.0:7740", LAB_TELEMETRY_URL: "http://labd:7701" }
+
+  cache:
+    <<: *service
+    environment: { ROLE: cache, LISTEN: "0.0.0.0:7750", LAB_TELEMETRY_URL: "http://labd:7701" }
+
+  db:
+    <<: *service
+    environment: { ROLE: db, LISTEN: "0.0.0.0:7760", LAB_TELEMETRY_URL: "http://labd:7701" }
+
+  queue:
+    <<: *service
+    environment: { ROLE: queue, LISTEN: "0.0.0.0:7770", WORKER_URL: "http://toxiproxy:7791", LAB_TELEMETRY_URL: "http://labd:7701" }
+
+  worker:
+    <<: *service
+    environment: { ROLE: worker, LISTEN: "0.0.0.0:7790", LAB_TELEMETRY_URL: "http://labd:7701" }
+    networks: [c-side]
 
 networks:
   a-side: { internal: true }
   b-side: { internal: true }
+  c-side: { internal: true }
   front: {}
 
 volumes:

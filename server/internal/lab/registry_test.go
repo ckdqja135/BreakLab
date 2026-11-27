@@ -8,6 +8,12 @@ import (
 	"breaklab/internal/wire"
 )
 
+var testEdges = []model.Edge{
+	{ID: "gen-a", From: generatorID, To: hubID},
+	{ID: "a-b", From: hubID, To: "service-b", Proxy: &model.EdgeProxy{Listen: "127.0.0.1:7721"}},
+	{ID: "a-pay", From: hubID, To: "pay", Proxy: &model.EdgeProxy{Listen: "127.0.0.1:7741"}},
+}
+
 // 요청 1개에 대해 주어진 span만 도착했을 때의 관측 상태와 A에서 B 호출의 경로 판정을 확인한다.
 func TestObservationAndRoute(t *testing.T) {
 	span := func(id, parent, svc, kind string, a map[string]string) model.Span {
@@ -43,7 +49,7 @@ func TestObservationAndRoute(t *testing.T) {
 	faults := []model.Fault{{ID: "f", Edge: "a-b", AppliedUs: 5}}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r := newRegistry("127.0.0.1:7721", time.Minute)
+			r := newRegistry(testEdges, time.Minute)
 			open := root
 			open.EndUs = 0
 			r.begin(model.Trace{TraceID: "t", StartUs: 10}, open)
@@ -62,7 +68,7 @@ func TestObservationAndRoute(t *testing.T) {
 				t.Fatalf("관측 상태 %s, 기대 %s (%v)", got.Observation, c.obs, got.Notes)
 			}
 			for _, s := range got.Spans {
-				if s.Edge == injectableEdge && (s.Route != c.route || (len(s.FaultIDs) > 0) != c.affectedByFl) {
+				if s.Edge == "a-b" && (s.Route != c.route || (len(s.FaultIDs) > 0) != c.affectedByFl) {
 					t.Fatalf("경로 %s 장애 %v, 기대 %s %v", s.Route, s.FaultIDs, c.route, c.affectedByFl)
 				}
 			}
@@ -72,14 +78,18 @@ func TestObservationAndRoute(t *testing.T) {
 
 // 서비스 장애는 요청에 그 ID가 실려 있던 호출에만 표시한다. 시간이 겹쳐도 실리지 않았으면 표시하지 않는다.
 func TestServiceFaultMarksOnlyCarriers(t *testing.T) {
-	faults := []model.Fault{{ID: "aa", Node: injectableNode, AppliedUs: 5}}
-	call := func(ids string) *model.Span {
-		return &model.Span{Edge: injectableEdge, StartUs: 10, EndUs: 20, Route: "bypassed", Attrs: map[string]string{"lab.fault_ids": ids}}
+	r := newRegistry(testEdges, time.Minute)
+	faults := []model.Fault{{ID: "aa", Node: "service-b", AppliedUs: 5}}
+	call := func(edge, ids string) *model.Span {
+		return &model.Span{Edge: edge, StartUs: 10, EndUs: 20, Route: "bypassed", Attrs: map[string]string{"lab.fault_ids": ids}}
 	}
-	if got := faultsFor(call("bb,aa"), faults); len(got) != 1 || got[0] != "aa" {
+	if got := r.faultsFor(call("a-b", "bb,aa"), faults); len(got) != 1 || got[0] != "aa" {
 		t.Fatalf("실려 있던 장애만 표시해야 함: %v", got)
 	}
-	if got := faultsFor(call(""), faults); len(got) != 0 {
+	if got := r.faultsFor(call("a-b", ""), faults); len(got) != 0 {
 		t.Fatalf("실리지 않은 호출에는 표시하지 않아야 함: %v", got)
+	}
+	if got := r.faultsFor(call("a-pay", "aa"), faults); len(got) != 0 {
+		t.Fatalf("다른 서비스를 부른 호출에는 표시하지 않아야 함: %v", got)
 	}
 }

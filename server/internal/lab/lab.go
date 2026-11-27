@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -29,20 +31,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const (
-	generatorID    = "generator"
-	injectableEdge = "a-b"
-	injectableNode = "service-b"
-)
-
-// edges는 실험을 허용한 연결 목록이다. API는 이 목록의 ID만 받는다.
-var edges = []model.Edge{
-	{ID: "gen-a", From: generatorID, To: "service-a", Protocol: "HTTP/1.1"},
-	{ID: "a-b", From: "service-a", To: "service-b", Protocol: "HTTP/1.1"},
-}
-
 type Config struct {
-	AURL, AHealth, BHealth string
+	AURL     string    // 요청 발생기가 부르는 A의 주소
+	Services []Service // A가 부르는 서비스들의 관리 경로
 }
 
 // Conflict는 현재 상태에서 할 수 없는 요청이다.
@@ -66,6 +57,8 @@ type Lab struct {
 	probe  *http.Client
 	topo   model.Topology
 	limits model.Limits
+	bases  map[string]string // 서비스 ID별 관리 경로 주소
+	order  []string          // 서비스 ID. 화면에 보내는 순서
 
 	opMu sync.Mutex // Toxiproxy 변경을 한 번에 하나씩 처리한다.
 
@@ -79,30 +72,44 @@ type Lab struct {
 	inflight     int
 	seq          int
 	wg           *sync.WaitGroup
-	proxy        model.ProxyState
+	proxies      map[string]model.ProxyState // 연결 ID별
 	services     map[string]*model.ServiceStatus
 	storeErr     string
 }
 
 func New(cfg Config, st *store.Store, px *proxyctl.Ctl) *Lab {
-	es := append([]model.Edge(nil), edges...)
-	es[1].Proxy = &model.EdgeProxy{Name: px.Name, Listen: px.Listen, Upstream: px.Upstream, Edges: []string{"a-b"}}
 	l := &Lab{
 		cfg: cfg, st: st, hub: hub.New(), px: px, limits: model.DefaultLimits,
-		client: &http.Client{Transport: &http.Transport{DisableKeepAlives: true, Proxy: nil}},
-		probe:  &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true, Proxy: nil}},
-		topo: model.Topology{Nodes: []model.Node{
-			{ID: generatorID, Name: "요청 발생기", Role: "관리 서버 안에서 실제 HTTP 요청을 보냄", Addr: "labd"},
-			{ID: "service-a", Name: "Service A", Role: "요청을 받아 B를 호출", Addr: cfg.AURL},
-			{ID: "service-b", Name: "Service B", Role: "재고 조회 응답", Addr: "http://" + px.Upstream},
-		}, Edges: es},
-		services: map[string]*model.ServiceStatus{
-			"service-a": {Service: "service-a", Health: "unknown", Telemetry: "never"},
-			"service-b": {Service: "service-b", Health: "unknown", Telemetry: "never"},
-		},
-		wg: &sync.WaitGroup{},
+		client:   &http.Client{Transport: &http.Transport{DisableKeepAlives: true, Proxy: nil}},
+		probe:    &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true, Proxy: nil}},
+		bases:    map[string]string{hubID: cfg.AURL},
+		proxies:  map[string]model.ProxyState{},
+		services: map[string]*model.ServiceStatus{},
+		wg:       &sync.WaitGroup{},
 	}
-	l.reg = newRegistry(px.Listen, time.Duration(l.limits.ObservationGrace)*time.Millisecond)
+	for _, s := range cfg.Services {
+		l.bases[s.ID] = s.Base
+	}
+	for _, n := range nodes {
+		nd := n.Node
+		if nd.Addr = l.bases[n.ID]; n.ID == generatorID {
+			nd.Addr = "labd"
+		} else {
+			l.services[n.ID] = &model.ServiceStatus{Service: n.ID, Health: "unknown", Telemetry: "never"}
+			l.order = append(l.order, n.ID)
+		}
+		l.topo.Nodes = append(l.topo.Nodes, nd)
+	}
+	for _, e := range edges {
+		if p, ok := px.Proxy(e.ID); ok {
+			e.Proxy = &model.EdgeProxy{Name: p.Name, Listen: p.Listen, Upstream: p.Upstream, Edges: []string{e.ID}}
+		}
+		l.topo.Edges = append(l.topo.Edges, e)
+	}
+	for _, s := range scenarios {
+		l.topo.Scenarios = append(l.topo.Scenarios, s.Scenario)
+	}
+	l.reg = newRegistry(l.topo.Edges, time.Duration(l.limits.ObservationGrace)*time.Millisecond)
 	l.tracer = sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rootProcessor{l.reg})).Tracer("breaklab")
 	return l
 }
@@ -171,7 +178,7 @@ func (l *Lab) State() map[string]any {
 		faults = append(faults, *f)
 	}
 	svcs := []model.ServiceStatus{}
-	for _, id := range []string{"service-a", "service-b"} {
+	for _, id := range l.order {
 		svcs = append(svcs, *l.services[id])
 	}
 	var run *model.Run
@@ -181,8 +188,43 @@ func (l *Lab) State() map[string]any {
 	}
 	return map[string]any{
 		"topology": l.topo, "limits": l.limits, "defaults": model.DefaultSettings, "run": run, "repeat": l.repeat,
-		"faults": faults, "traces": traces, "services": svcs, "proxy": l.proxy, "storeError": l.storeErr,
+		"faults": faults, "traces": traces, "services": svcs, "proxies": l.proxyCopy(), "storeError": l.storeErr,
 		"nowUs": model.NowUs(),
+	}
+}
+
+// proxyCopy는 mu를 잡은 상태에서 호출한다.
+func (l *Lab) proxyCopy() map[string]model.ProxyState {
+	out := make(map[string]model.ProxyState, len(l.proxies))
+	for k, v := range l.proxies {
+		out[k] = v
+	}
+	return out
+}
+
+// setProxies는 읽어 온 프록시 상태를 반영하고 화면에 알린다.
+func (l *Lab) setProxies(sts map[string]model.ProxyState) {
+	l.mu.Lock()
+	for k, v := range sts {
+		l.proxies[k] = v
+	}
+	all := l.proxyCopy()
+	l.mu.Unlock()
+	l.hub.Publish("proxies", all)
+}
+
+// reset은 서비스가 실험 중에 쌓은 기억을 관리 경로로 비운다. 실패해도 서비스는 새 실험의 첫 요청에서 스스로 비운다.
+func (l *Lab) reset(only func(nodeDef) bool) {
+	for _, n := range nodes {
+		if !only(n) {
+			continue
+		}
+		req, _ := http.NewRequest("POST", l.bases[n.ID]+"/lab/reset", nil)
+		if resp, err := l.probe.Do(req); err != nil {
+			log.Printf("%s 초기화 실패: %v", n.ID, err)
+		} else {
+			resp.Body.Close()
+		}
 	}
 }
 
@@ -195,7 +237,13 @@ func (l *Lab) unresolvedLocked() *model.Fault {
 	return nil
 }
 
-func (l *Lab) StartRun(label string, s model.Settings, limitSec int) (*model.Run, error) {
+func (l *Lab) StartRun(label, topic string, s model.Settings, limitSec int) (*model.Run, error) {
+	if topic == "" {
+		topic = scenarios[0].ID
+	}
+	if scenario(topic) == nil {
+		return nil, Invalid{"없는 실험 주제입니다"}
+	}
 	if err := s.Validate(); err != nil {
 		return nil, Invalid{err.Error()}
 	}
@@ -218,15 +266,13 @@ func (l *Lab) StartRun(label string, s model.Settings, limitSec int) (*model.Run
 	l.mu.Unlock()
 
 	// 시작 전에 프록시가 깨끗한 상태인지 실제로 확인한다.
-	st, cl := l.px.Clear()
-	l.mu.Lock()
-	l.proxy = st
-	l.mu.Unlock()
-	l.hub.Publish("proxy", st)
+	sts, cl := l.px.Clear()
+	l.setProxies(sts)
 	if !cl.Verified {
 		return nil, Conflict{"프록시 상태를 확인할 수 없어 시작하지 않았습니다. " + cl.Detail}
 	}
 	l.resolveFailed(cl)
+	l.reset(func(n nodeDef) bool { return n.stateful })
 
 	for _, t := range l.reg.collect(nil, true) { // 이전 실행의 남은 관측을 확정한다.
 		l.save(l.st.SaveTrace(t))
@@ -234,7 +280,7 @@ func (l *Lab) StartRun(label string, s model.Settings, limitSec int) (*model.Run
 	l.reg.reset()
 	l.mu.Lock()
 	l.runCtx, l.runCancel = context.WithCancel(context.Background())
-	l.run = &model.Run{ID: newID(), Label: label, StartedUs: model.NowUs(), LimitSec: limitSec, Status: "running", Settings: s}
+	l.run = &model.Run{ID: newID(), Scenario: topic, Label: label, StartedUs: model.NowUs(), LimitSec: limitSec, Status: "running", Settings: s}
 	l.faults, l.seq, l.repeat, l.wg = nil, 0, model.Repeat{}, &sync.WaitGroup{}
 	run := *l.run
 	l.mu.Unlock()
@@ -274,8 +320,11 @@ func (l *Lab) EndRun(reason string) (model.Cleanup, int, error) {
 	}
 
 	l.opMu.Lock()
-	cl := l.clearFaults(reason, true)
+	cl := l.clearFaults(reason)
 	l.opMu.Unlock()
+	if active {
+		l.reset(func(n nodeDef) bool { return n.drain }) // 밀린 작업이 실험이 끝난 뒤에 흘러가지 않게 한다.
+	}
 
 	if active {
 		done := make(chan struct{})
@@ -294,16 +343,14 @@ func (l *Lab) EndRun(reason string) (model.Cleanup, int, error) {
 	return cl, canceled, nil
 }
 
-// clearFaults는 opMu를 잡은 상태에서 호출한다. 프록시를 비우고 연결 장애를 끝낸다.
-// all이면 서비스 장애도 함께 끝낸다.
-func (l *Lab) clearFaults(reason string, all bool) model.Cleanup {
+// clearFaults는 opMu를 잡은 상태에서 호출한다. 모든 프록시를 비우고 모든 장애를 끝낸다.
+func (l *Lab) clearFaults(reason string) model.Cleanup {
 	req := model.NowUs()
-	st, cl := l.px.Clear()
+	sts, cl := l.px.Clear()
 	var changed []model.Fault
 	l.mu.Lock()
-	l.proxy = st
 	for _, f := range l.faults {
-		if f.Final() || (f.Node != "" && !all) {
+		if f.Final() {
 			continue
 		}
 		if f.RemoveReqUs == 0 {
@@ -317,12 +364,28 @@ func (l *Lab) clearFaults(reason string, all bool) model.Cleanup {
 		changed = append(changed, *f)
 	}
 	l.mu.Unlock()
-	l.hub.Publish("proxy", st)
+	l.setProxies(sts)
 	for _, f := range changed {
 		l.publishFault(f)
 		l.event(f.RunID, "fault_"+f.State, faultText(f)+" 종료 ("+reasonText[reason]+"): "+f.Cleanup.Detail)
 	}
 	return cl
+}
+
+// clearEdge는 opMu를 잡은 상태에서 호출한다. 연결 하나의 프록시를 비우고 그 연결의 장애만 끝낸다.
+func (l *Lab) clearEdge(f *model.Fault, reason string) model.Fault {
+	sts, cl := l.px.Clear(f.Edge)
+	l.mu.Lock()
+	if f.RemoveReqUs == 0 {
+		f.RemoveReqUs = model.NowUs()
+	}
+	l.settle(f, reason, cl)
+	snap := *f
+	l.mu.Unlock()
+	l.setProxies(sts)
+	l.publishFault(snap)
+	l.event(snap.RunID, "fault_"+snap.State, faultText(snap)+" 종료 ("+reasonText[reason]+"): "+cl.Detail)
+	return snap
 }
 
 // 서비스 장애는 요청에 실어 보내므로 남는 상태가 없다. 싣기를 멈추면 끝난다.
@@ -374,36 +437,36 @@ var reasonText = map[string]string{
 }
 
 func faultText(f model.Fault) string {
+	if f.Node != "" {
+		if f.Type == "error" {
+			return fmt.Sprintf("%s 오류 응답 %d%%", nodeName(f.Node), f.Percent)
+		}
+		return fmt.Sprintf("%s 과부하 (동시 %d개, 건당 %dms)", nodeName(f.Node), f.Slots, f.WorkMs)
+	}
+	to := f.Edge
+	if e := edgeDef(f.Edge); e != nil {
+		to = nodeName(e.To)
+	}
+	switch f.Type {
+	case "cut":
+		return to + " 연결 차단"
+	case "reset":
+		return to + " 연결 리셋"
+	case "blackhole":
+		return to + " 연결 응답 없음"
+	}
 	dir := "응답 방향"
 	if f.Direction == "request" {
 		dir = "요청 방향"
 	}
-	switch f.Type {
-	case "cut":
-		return "연결 차단"
-	case "reset":
-		return "연결 리셋"
-	case "blackhole":
-		return "응답 없음"
-	case "error":
-		return fmt.Sprintf("B 오류 응답 %d%%", f.Percent)
-	case "overload":
-		return fmt.Sprintf("B 과부하 (동시 %d개, 건당 %dms)", f.Slots, f.WorkMs)
-	}
-	return fmt.Sprintf("지연 %dms %s", f.LatencyMs, dir)
+	return fmt.Sprintf("%s 연결 지연 %dms %s", to, f.LatencyMs, dir)
 }
 
 func (l *Lab) ApplyFault(in model.Fault) (*model.Fault, error) {
 	onNode := in.Type == "error" || in.Type == "overload"
 	if onNode {
-		if in.Node != injectableNode {
-			return nil, Invalid{"장애를 넣을 수 없는 서비스입니다"}
-		}
 		in.Edge, in.Direction, in.LatencyMs, in.JitterMs = "", "", 0, 0
 	} else {
-		if in.Edge != injectableEdge {
-			return nil, Invalid{"장애를 넣을 수 없는 연결입니다"}
-		}
 		in.Node, in.Percent, in.Slots, in.WorkMs = "", 0, 0, 0
 	}
 	switch in.Type {
@@ -449,6 +512,23 @@ func (l *Lab) ApplyFault(in model.Fault) (*model.Fault, error) {
 		l.mu.Unlock()
 		return nil, Conflict{"이전 장애의 정리가 확인되지 않았습니다"}
 	}
+	// 이 실험의 주제에 들어 있는 대상에만 건다.
+	sc := scenario(l.run.Scenario)
+	target := false
+	if onNode {
+		for _, n := range nodes {
+			target = target || (n.ID == in.Node && n.Faults && sc.hasNode(n.ID))
+		}
+	} else if _, ok := l.px.Proxy(in.Edge); ok {
+		target = sc.has(sc.Edges, in.Edge)
+	}
+	if !target {
+		l.mu.Unlock()
+		if onNode {
+			return nil, Invalid{"장애를 넣을 수 없는 서비스입니다"}
+		}
+		return nil, Invalid{"장애를 넣을 수 없는 연결입니다"}
+	}
 	for _, f := range l.faults {
 		if f.Edge == in.Edge && f.Node == in.Node && !f.Final() {
 			l.mu.Unlock()
@@ -476,15 +556,14 @@ func (l *Lab) ApplyFault(in model.Fault) (*model.Fault, error) {
 	err := l.px.Apply(snap)
 	var st model.ProxyState
 	if err == nil {
-		if st, err = l.px.State(); err == nil && !proxyctl.Matches(st, snap) {
+		if st, err = l.px.State(snap.Edge); err == nil && !proxyctl.Matches(st, snap) {
 			err = errors.New("적용 후 프록시 상태가 설정과 다릅니다")
 		}
 	}
 	if err != nil {
 		// 일부만 적용됐을 수 있으므로 바로 정리하고 확인한다.
-		st2, cl := l.px.Clear()
+		st2, cl := l.px.Clear(snap.Edge)
 		l.mu.Lock()
-		l.proxy = st2
 		f.Error, f.EndReason = err.Error(), "apply_failed"
 		f.Cleanup = &cl
 		f.State = "apply_failed"
@@ -494,17 +573,16 @@ func (l *Lab) ApplyFault(in model.Fault) (*model.Fault, error) {
 		snap = *f
 		l.mu.Unlock()
 		l.publishFault(snap)
-		l.hub.Publish("proxy", st2)
+		l.setProxies(st2)
 		l.event(snap.RunID, "fault_apply_failed", faultText(snap)+": "+err.Error())
 		return nil, Conflict{"장애를 적용하지 못했습니다: " + err.Error()}
 	}
 	l.mu.Lock()
 	f.State, f.AppliedUs = "active", st.CheckedUs
 	f.ExpiresUs = f.AppliedUs + int64(f.TTLSec)*1e6
-	l.proxy = st
 	snap = *f
 	l.mu.Unlock()
-	l.hub.Publish("proxy", st)
+	l.setProxies(map[string]model.ProxyState{snap.Edge: st})
 	l.publishFault(snap)
 	l.event(snap.RunID, "fault_active", faultText(snap)+" 적용 확인")
 	return &snap, nil
@@ -537,10 +615,7 @@ func (l *Lab) RemoveFault(id, reason string) (*model.Fault, error) {
 	snap := *f
 	l.mu.Unlock()
 	l.publishFault(snap)
-	l.clearFaults(reason, false)
-	l.mu.Lock()
-	snap = *f
-	l.mu.Unlock()
+	snap = l.clearEdge(f, reason)
 	if snap.State != "removed" {
 		return &snap, Conflict{"장애 제거를 확인하지 못했습니다. " + snap.Cleanup.Detail}
 	}
@@ -567,25 +642,20 @@ func (l *Lab) Send(kind string) (int, string, error) {
 	l.wg.Add(1)
 	seq, run, rctx, wg := l.seq, *l.run, l.runCtx, l.wg
 	// 적용 중인 서비스 장애는 요청을 만드는 순간의 값으로 싣는다. 보낸 뒤에는 바뀌지 않는다.
+	sc := scenario(run.Scenario)
 	pol := run.Settings.Policy()
-	var carried []string
+	pol.Flow, pol.Run, pol.Faults = sc.flow, run.ID, map[string]wire.ServiceFault{}
 	for _, f := range l.faults {
-		if f.Node == "" || f.State != "active" {
-			continue
-		}
-		carried = append(carried, f.ID)
-		switch f.Type {
-		case "error":
-			pol.FailPercent = f.Percent
-		case "overload":
-			pol.Slots, pol.Work = f.Slots, time.Duration(f.WorkMs)*time.Millisecond
+		if f.Node != "" && f.State == "active" {
+			pol.Faults[f.Node] = wire.ServiceFault{ID: f.ID, FailPercent: f.Percent, Slots: f.Slots, WorkMs: f.WorkMs}
 		}
 	}
-	pol.Faults = strings.Join(carried, ",")
 	l.mu.Unlock()
+	path := sc.path(seq)
+	name := "GET " + strings.SplitN(path, "?", 2)[0]
 
-	ctx, span := l.tracer.Start(rctx, "GET /order", trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
-		attribute.String("peer.service", "service-a"), attribute.String("http.request.method", "GET"),
+	ctx, span := l.tracer.Start(rctx, name, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
+		attribute.String("peer.service", hubID), attribute.String("http.request.method", "GET"),
 		attribute.String("lab.run_id", run.ID), attribute.Int("lab.seq", seq),
 		attribute.Int("lab.timeout_ms", run.Settings.ClientTimeoutMs)))
 	root := tele.FromReadOnly(span.(sdktrace.ReadOnlySpan), generatorID)
@@ -597,16 +667,16 @@ func (l *Lab) Send(kind string) (int, string, error) {
 			l.mu.Unlock()
 			wg.Done()
 		}()
-		l.do(ctx, rctx, span, run.Settings, pol)
+		l.do(ctx, rctx, span, run.Settings, pol, path)
 	}()
 	return seq, root.TraceID, nil
 }
 
-func (l *Lab) do(ctx, rctx context.Context, span trace.Span, s model.Settings, pol wire.Policy) {
+func (l *Lab) do(ctx, rctx context.Context, span trace.Span, s model.Settings, pol wire.Policy, path string) {
 	timeout := time.Duration(s.ClientTimeoutMs) * time.Millisecond
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", l.cfg.AURL+"/order", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", l.cfg.AURL+path, nil)
 	pol.Apply(req.Header)
 	tele.Propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 
@@ -768,10 +838,11 @@ func (l *Lab) Recover() {
 		}
 	}
 	l.opMu.Lock()
-	st, cl := l.px.Clear()
+	sts, cl := l.px.Clear()
 	l.opMu.Unlock()
+	l.setProxies(sts)
+	l.reset(func(n nodeDef) bool { return n.stateful })
 	l.mu.Lock()
-	l.proxy = st
 	for _, f := range l.faults {
 		if !cl.Verified {
 			c := cl
@@ -800,6 +871,7 @@ func (l *Lab) Loop(ctx context.Context) {
 	go every(ctx, 250*time.Millisecond, l.expire)
 	go every(ctx, 2*time.Second, l.reconcile)
 	go every(ctx, 2*time.Second, l.checkServices)
+	go every(ctx, 500*time.Millisecond, l.readGauges)
 }
 
 func every(ctx context.Context, d time.Duration, fn func()) {
@@ -888,60 +960,66 @@ func (l *Lab) expire() {
 	}
 }
 
-// reconcile은 프록시의 실제 상태를 기대 상태와 비교하고 어긋나면 안전한 쪽으로 정리한다.
+// reconcile은 프록시들의 실제 상태를 기대 상태와 비교하고 어긋나면 안전한 쪽으로 정리한다.
 func (l *Lab) reconcile() {
 	l.opMu.Lock()
 	defer l.opMu.Unlock()
-	st, err := l.px.State()
+	sts, errs := l.px.States()
 	l.mu.Lock()
-	var active, failed *model.Fault
+	active := map[string]*model.Fault{}
+	failed := false
 	for _, f := range l.faults {
 		if f.Node != "" {
 			continue // 서비스 장애는 프록시 상태와 무관하다.
 		}
 		switch f.State {
 		case "active":
-			active = f
+			active[f.Edge] = f
 		case "cleanup_failed":
-			failed = f
+			failed = true
 		}
 	}
-	l.proxy = st
 	runID := ""
 	if l.run != nil {
 		runID = l.run.ID
 	}
 	l.mu.Unlock()
-	if err != nil && !st.Reachable {
-		l.hub.Publish("proxy", st)
-		return
-	}
-	switch {
-	case active != nil && err == nil && proxyctl.Matches(st, *active):
-	case active != nil:
-		l.event(active.RunID, "fault_lost", "프록시 상태가 설정과 달라져 장애를 종료함")
-		l.clearFaults("lost", false)
-		return
-	case err != nil || !proxyctl.Clean(st):
-		l.event(runID, "unexpected_state", "기록에 없는 프록시 상태를 발견해 정리함")
-		var cl model.Cleanup
-		st, cl = l.px.Clear()
-		l.mu.Lock()
-		l.proxy = st
-		l.mu.Unlock()
-		if cl.Verified {
-			l.resolveFailed(cl)
+	l.setProxies(sts)
+	var lost []*model.Fault
+	var dirty []string
+	for _, edge := range l.px.Edges() {
+		st, f := sts[edge], active[edge]
+		if !st.Reachable {
+			return // Toxiproxy에 닿지 않으면 판단하지 않는다.
 		}
-	case failed != nil:
-		l.resolveFailed(model.Cleanup{Verified: true, CheckedUs: st.CheckedUs, Detail: "남은 toxic 0개, 프록시 켜짐을 확인함"})
+		switch {
+		case f != nil && errs[edge] == nil && proxyctl.Matches(st, *f):
+		case f != nil:
+			lost = append(lost, f)
+		case errs[edge] != nil || !proxyctl.Clean(st):
+			dirty = append(dirty, edge)
+		}
 	}
-	l.hub.Publish("proxy", st)
+	for _, f := range lost {
+		l.event(f.RunID, "fault_lost", "프록시 상태가 설정과 달라져 장애를 종료함: "+faultText(*f))
+		l.clearEdge(f, "lost")
+	}
+	clean := model.Cleanup{Verified: true, CheckedUs: model.NowUs(), Detail: "남은 toxic 0개, 프록시 켜짐을 확인함"}
+	if len(dirty) > 0 {
+		l.event(runID, "unexpected_state", "기록에 없는 프록시 상태를 발견해 정리함")
+		var fixed map[string]model.ProxyState
+		fixed, clean = l.px.Clear(dirty...)
+		l.setProxies(fixed)
+	}
+	if failed && len(lost) == 0 && clean.Verified {
+		l.resolveFailed(clean)
+	}
 }
 
 // checkServices는 실험 트래픽과 분리된 경로로 서비스와 관측 수신 상태를 따로 확인한다.
 func (l *Lab) checkServices() {
-	for id, url := range map[string]string{"service-a": l.cfg.AHealth, "service-b": l.cfg.BHealth} {
-		resp, err := l.probe.Get(url)
+	for _, id := range l.order {
+		resp, err := l.probe.Get(l.bases[id] + "/healthz")
 		l.mu.Lock()
 		s := l.services[id]
 		s.HealthUs, s.Health, s.HealthError = model.NowUs(), "up", ""
@@ -965,11 +1043,40 @@ func (l *Lab) checkServices() {
 	}
 }
 
+// readGauges는 서비스가 스스로 센 값(밀린 작업 수 등)을 관리 경로로 읽는다. 값이 바뀐 서비스만 화면에 알린다.
+func (l *Lab) readGauges() {
+	for _, n := range nodes {
+		if !n.gauges {
+			continue
+		}
+		var out struct {
+			Gauges []wire.Gauge `json:"gauges"`
+		}
+		resp, err := l.probe.Get(l.bases[n.ID] + "/lab/stats")
+		if err == nil {
+			err = json.NewDecoder(io.LimitReader(resp.Body, 1<<14)).Decode(&out)
+			resp.Body.Close()
+		}
+		if err != nil {
+			out.Gauges = nil
+		}
+		l.mu.Lock()
+		s := l.services[n.ID]
+		same := slices.Equal(s.Gauges, out.Gauges)
+		s.Gauges = out.Gauges
+		snap := *s
+		l.mu.Unlock()
+		if !same {
+			l.hub.Publish("service", snap)
+		}
+	}
+}
+
 // Shutdown은 종료 전에 장애를 정리한다.
 func (l *Lab) Shutdown() {
 	if _, _, err := l.EndRun("shutdown"); err != nil {
 		l.opMu.Lock()
-		l.clearFaults("shutdown", true)
+		l.clearFaults("shutdown")
 		l.opMu.Unlock()
 	}
 }

@@ -15,7 +15,7 @@ function reduce(s: LabState, type: string, d: any): LabState {
     case 'fault': return { ...s, faults: upsert(s.faults, d as Fault, (f) => f.id === d.id) }
     case 'trace': return s.run && d.runId !== s.run.id ? s : { ...s, traces: upsert(s.traces, d as Trace, (t) => t.traceId === d.traceId) }
     case 'service': return { ...s, services: upsert(s.services, d as ServiceStatus, (x) => x.service === d.service) }
-    case 'proxy': return { ...s, proxy: d }
+    case 'proxies': return { ...s, proxies: d }
     case 'notice': return { ...s, storeError: d.storeError }
   }
   return s
@@ -62,7 +62,7 @@ export function useLab(onTrace: (t: Trace) => void): Lab {
         setConnected(true)
         render()
       })
-      for (const type of ['run', 'fault', 'trace', 'service', 'proxy', 'notice']) {
+      for (const type of ['run', 'fault', 'trace', 'service', 'proxies', 'notice']) {
         es.addEventListener(type, (e) => {
           if (!live.current) return
           const d = JSON.parse((e as MessageEvent).data)

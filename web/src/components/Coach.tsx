@@ -2,7 +2,7 @@
 import { Check, ChevronRight, CircleCheck, Eye, GraduationCap, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { LESSONS, active, type Burst, type Ctx, type Lesson, type Step } from '../lessons'
-import type { FaultInput } from '../types'
+import type { FaultInput, Scenario } from '../types'
 
 const KEY = 'breaklab.learn'
 interface Saved { open: boolean; done: string[] }
@@ -31,12 +31,12 @@ export interface CoachState {
   burst: Burst | null
 }
 
-export function useCoach(base: Omit<Ctx, 'lessonUs' | 'sinceUs'> | null, nowUs: number, onStart: (l: Lesson) => void): CoachState {
+export function useCoach(base: Omit<Ctx, 'lessonUs' | 'sinceUs' | 'topic'> | null, nowUs: number, onStart: (l: Lesson) => void): CoachState {
   const [saved, setSaved] = useState(load)
   const [course, setCourse] = useState<Course | null>(null)
   useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(saved)) } catch { /* 저장하지 못해도 이번 접속에서는 쓸 수 있다 */ } }, [saved])
 
-  const ctx = base && course ? { ...base, lessonUs: course.lessonUs, sinceUs: course.sinceUs } : null
+  const ctx = base && course ? { ...base, topic: course.lesson.topic, lessonUs: course.lessonUs, sinceUs: course.sinceUs } : null
   const step = course && !course.ended ? course.lesson.steps[course.step] : null
   const advance = (note?: string) => {
     if (!course) return
@@ -71,7 +71,7 @@ export function useCoach(base: Omit<Ctx, 'lessonUs' | 'sinceUs'> | null, nowUs: 
   }
 }
 
-export function Coach({ c }: { c: CoachState }) {
+export function Coach({ c, topics }: { c: CoachState; topics: Scenario[] }) {
   const close = <button className="icon" aria-label="학습 과정 닫기" onClick={() => c.setOpen(false)}><X size={15} /></button>
   if (!c.course) {
     return (
@@ -79,17 +79,22 @@ export function Coach({ c }: { c: CoachState }) {
         <header><GraduationCap size={17} aria-hidden /><b>학습 과정</b><span className="grow" />{close}</header>
         <div className="coachbody">
           <p className="lead">장애를 직접 일으키며 하나씩 배웁니다. 처음이라면 1번부터 해 보세요.</p>
-          <ol className="lessons">
-            {LESSONS.map((l, i) => (
-              <li key={l.id}>
-                <button onClick={() => c.start(l)}>
-                  <i className={c.done.includes(l.id) ? 'done' : ''}>{c.done.includes(l.id) ? <Check size={14} aria-label="마침" /> : i + 1}</i>
-                  <span><b>{l.title}</b><small>{l.goal}</small></span>
-                  <ChevronRight size={15} aria-hidden />
-                </button>
-              </li>
-            ))}
-          </ol>
+          {topics.map((tp) => (
+            <section key={tp.id}>
+              <h4>{tp.name}</h4>
+              <ol className="lessons">
+                {LESSONS.filter((l) => l.topic === tp.id).map((l) => (
+                  <li key={l.id}>
+                    <button onClick={() => c.start(l)}>
+                      <i className={c.done.includes(l.id) ? 'done' : ''}>{c.done.includes(l.id) ? <Check size={14} aria-label="마침" /> : LESSONS.indexOf(l) + 1}</i>
+                      <span><b>{l.title}</b><small>{l.goal}</small></span>
+                      <ChevronRight size={15} aria-hidden />
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          ))}
         </div>
       </aside>
     )

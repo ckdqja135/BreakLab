@@ -1,4 +1,5 @@
 import { Ban, Bug, CircleAlert, CircleCheck, CircleHelp, CircleX, Eye, EyeOff, Ghost, Hourglass, LoaderCircle, Scissors, Timer, TimerOff, Unplug, type LucideIcon } from 'lucide-react'
+import { EDGE_TO, NODE, meta } from './meta'
 import type { Fault, FaultInput, FaultType, Observation, Peer, Result, Route } from './types'
 
 export function ms(us: number | undefined): string {
@@ -51,30 +52,37 @@ export const reasonLabel: Record<string, string> = {
   manual: '수동', expired: '자동 만료', emergency: '비상 중지', time_limit: '시간 제한', shutdown: '서버 종료', restart: '재시작 후 정리',
   interrupted: '비정상 중단', lost: '프록시 상태 변경 감지', apply_failed: '적용 실패', done: '완료', limit: '제한 도달',
 }
-export const nodeName: Record<string, string> = { generator: '요청 발생기', 'service-a': 'Service A', 'service-b': 'Service B' }
+export const nodeName: Record<string, string> = Object.fromEntries(Object.entries(NODE).map(([id, m]) => [id, m.name]))
 
 // 사람이 체감하는 시간. 표의 정확한 값은 ms()를 쓴다.
 export const human = (us: number) => {
   const s = Math.max(0, us) / 1e6
-  return `${s.toFixed(s < 0.01 ? 3 : s < 1 ? 2 : 1)}초`
+  return s < 0.01 ? `${(s * 1000).toFixed(1)}ms` : `${s.toFixed(s < 1 ? 2 : 1)}초`
 }
 
 export const faultKind: Record<FaultType, { name: string; icon: LucideIcon; about: string }> = {
   latency: { name: '지연', icon: Timer, about: '지나가는 데이터를 정해진 시간만큼 늦춥니다.' },
   cut: { name: '연결 차단', icon: Unplug, about: '프록시를 닫습니다. 열려 있던 연결은 끊기고 새 연결은 바로 거부됩니다.' },
-  blackhole: { name: '응답 없음', icon: Ghost, about: '연결은 받아 주지만 요청을 버립니다. B에는 아무것도 닿지 않고, A는 타임아웃까지 기다립니다.' },
+  blackhole: { name: '응답 없음', icon: Ghost, about: '연결은 받아 주지만 요청을 버립니다. 도착 서비스에는 아무것도 닿지 않고, 부른 쪽은 타임아웃까지 기다립니다.' },
   reset: { name: '연결 리셋', icon: Scissors, about: '요청이 지나가는 순간 연결을 강제로 끊습니다.' },
-  error: { name: '오류 응답', icon: Bug, about: 'B가 정해진 비율로 HTTP 500을 응답합니다. 버그가 섞인 배포와 비슷합니다.' },
-  overload: { name: '과부하', icon: Hourglass, about: 'B가 한 번에 몇 개만 처리하고 나머지는 줄을 세웁니다. 느려진 DB나 꽉 찬 서버와 비슷합니다.' },
+  error: { name: '오류 응답', icon: Bug, about: '이 서비스가 정해진 비율로 HTTP 500을 응답합니다. 버그가 섞인 배포와 비슷합니다.' },
+  overload: { name: '과부하', icon: Hourglass, about: '이 서비스가 한 번에 몇 개만 처리하고 나머지는 줄을 세웁니다. 느려진 DB나 꽉 찬 서버와 비슷합니다.' },
 }
 
-export const faultText = (f: FaultInput) => {
+// 장애의 내용만. 그림처럼 대상이 이미 보이는 곳에 쓴다.
+export const faultWhat = (f: FaultInput) => {
   switch (f.type) {
     case 'latency': return `지연 ${f.latencyMs?.toLocaleString()}ms${f.jitterMs ? ` ±${f.jitterMs}` : ''} (${f.direction === 'request' ? '요청 방향' : '응답 방향'})`
-    case 'error': return `B 오류 응답 ${f.percent}%`
-    case 'overload': return `B 과부하 (동시 ${f.slots}개, 건당 ${f.workMs?.toLocaleString()}ms)`
+    case 'error': return `오류 응답 ${f.percent}%`
+    case 'overload': return `과부하 (동시 ${f.slots}개, 건당 ${f.workMs?.toLocaleString()}ms)`
     default: return faultKind[f.type].name
   }
+}
+// 대상까지 붙인 이름. 표와 기록에 쓴다.
+export const faultText = (f: FaultInput) => {
+  const who = meta(f.node ?? EDGE_TO[f.edge ?? '']).short
+  const what = faultWhat(f)
+  return f.node || what.startsWith('연결 ') ? `${who} ${what}` : `${who} 연결 ${what}`
 }
 export const isActive = (f: Fault) => ['applying', 'active', 'removing', 'cleanup_failed'].includes(f.state)
 

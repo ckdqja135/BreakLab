@@ -36,7 +36,8 @@ function parentClient(t: Trace, s: Span): string | undefined {
   return srv?.parentId
 }
 
-const text = (seq: number, s: Span) => (s.attrs?.['lab.attempt'] ? `#${seq} 시도 ${s.attrs['lab.attempt']}` : `#${seq}`)
+const OPS: Record<string, string> = { get: '찾기', set: '저장' }
+const text = (seq: number, s: Span) => (OPS[s.attrs?.['lab.op'] ?? ''] ? `#${seq} ${OPS[s.attrs!['lab.op']]}` : s.attrs?.['lab.attempt'] ? `#${seq} 시도 ${s.attrs['lab.attempt']}` : `#${seq}`)
 
 export class LiveAnimator {
   private vis = new Map<string, Vis>()

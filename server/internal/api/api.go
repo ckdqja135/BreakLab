@@ -70,11 +70,12 @@ func Public(l *lab.Lab, webDir string, hosts []string) http.Handler {
 	mux.HandleFunc("POST /api/runs", func(w http.ResponseWriter, r *http.Request) {
 		in := struct {
 			Label    string         `json:"label"`
+			Scenario string         `json:"scenario"`
 			Settings model.Settings `json:"settings"`
 			LimitSec int            `json:"limitSec"`
 		}{Settings: model.DefaultSettings}
 		if body(w, r, &in) {
-			run, err := l.StartRun(strings.TrimSpace(in.Label), in.Settings, in.LimitSec)
+			run, err := l.StartRun(strings.TrimSpace(in.Label), in.Scenario, in.Settings, in.LimitSec)
 			reply(w, run, err)
 		}
 	})

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/.run/bin"; LOG="$ROOT/.run/logs"
 mkdir -p "$BIN" "$LOG" "$ROOT/.run/data" "$ROOT/.tools/bin"
 
-for port in 7700 7701 7710 7720 7721 8474; do
+for port in 7700 7701 7710 7720 7721 7730 7731 7740 7741 7750 7751 7760 7761 7770 7771 7790 7791 8474; do
   if lsof -nP -iTCP:$port -sTCP:LISTEN >/dev/null 2>&1; then
     echo "포트 $port 가 이미 사용 중입니다. 먼저 해당 프로세스를 확인하세요."; exit 1
   fi
@@ -34,8 +34,12 @@ trap cleanup EXIT INT TERM
 sleep 0.5
 LAB_DB="$ROOT/.run/data/lab.db" LAB_WEB_DIR="$ROOT/web/dist" "$BIN/labd" >"$LOG/labd.log" 2>&1 & LABD=$!
 sleep 0.5
-"$BIN/service-b" >"$LOG/service-b.log" 2>&1 & SVCB=$!
-B_URL="${B_URL:-http://127.0.0.1:7721}" "$BIN/service-a" >"$LOG/service-a.log" 2>&1 & SVCA=$!
-PIDS=("$LABD" "$SVCA" "$SVCB" "$TOXI")
+# A가 부르는 서비스들. 서비스는 아래 포트에서, 그 앞의 프록시는 포트+1에서 받는다.
+SVCS=()
+for pair in stock:7720 auth:7730 pay:7740 cache:7750 db:7760 queue:7770 worker:7790; do
+  ROLE="${pair%%:*}" LISTEN="127.0.0.1:${pair##*:}" "$BIN/service" >"$LOG/${pair%%:*}.log" 2>&1 & SVCS+=($!)
+done
+"$BIN/service-a" >"$LOG/service-a.log" 2>&1 & SVCA=$!
+PIDS=("$LABD" "$SVCA" "${SVCS[@]}" "$TOXI")
 echo "열기: http://127.0.0.1:7700  (로그: .run/logs)"
 wait "$LABD"

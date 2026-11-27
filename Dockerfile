@@ -13,6 +13,6 @@ COPY server/ ./
 RUN CGO_ENABLED=0 go build -o /out/ ./cmd/... && mkdir /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/labd /out/service-a /out/service-b /bin/
+COPY --from=build /out/labd /out/service-a /out/service /bin/
 COPY --from=web /web/dist /web
 COPY --from=build --chown=65532:65532 /out/data /data

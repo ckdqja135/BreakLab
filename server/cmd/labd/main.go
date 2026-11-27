@@ -40,13 +40,21 @@ func main() {
 	}
 	defer st.Close()
 
-	px := proxyctl.New(env("TOXIPROXY_URL", "http://127.0.0.1:8474"), os.Getenv("TOXIPROXY_AUTH_TOKEN"), "lab_a_to_b",
-		env("PROXY_LISTEN", "127.0.0.1:7721"), env("PROXY_UPSTREAM", "127.0.0.1:7720"))
-	l := lab.New(lab.Config{
-		AURL:    env("A_URL", "http://127.0.0.1:7710"),
-		AHealth: env("A_HEALTH_URL", "http://127.0.0.1:7710/healthz"),
-		BHealth: env("B_HEALTH_URL", "http://127.0.0.1:7720/healthz"),
-	}, st, px)
+	// 서비스마다 관리 경로 주소(KEY_BASE)와, 그 서비스 앞에 놓인 프록시(PROXY_KEY_LISTEN, PROXY_KEY_UPSTREAM)를 정한다.
+	// 기본값은 로컬 실행용이다. 서비스는 PORT, 프록시는 PORT+1에서 받는다.
+	cfg := lab.Config{AURL: env("A_URL", "http://127.0.0.1:7710")}
+	proxies := map[string]proxyctl.Proxy{}
+	for _, d := range []struct{ id, edge, key, port, proxy string }{
+		{"service-b", "a-b", "B", "7720", "7721"}, {"auth", "a-auth", "AUTH", "7730", "7731"}, {"pay", "a-pay", "PAY", "7740", "7741"},
+		{"cache", "a-cache", "CACHE", "7750", "7751"}, {"db", "a-db", "DB", "7760", "7761"}, {"queue", "a-queue", "QUEUE", "7770", "7771"},
+		{"worker", "queue-worker", "WORKER", "7790", "7791"},
+	} {
+		cfg.Services = append(cfg.Services, lab.Service{ID: d.id, Base: env(d.key+"_BASE", "http://127.0.0.1:"+d.port)})
+		proxies[d.edge] = proxyctl.Proxy{Name: "lab_" + strings.ReplaceAll(d.edge, "-", "_to_"),
+			Listen: env("PROXY_"+d.key+"_LISTEN", "127.0.0.1:"+d.proxy), Upstream: env("PROXY_"+d.key+"_UPSTREAM", "127.0.0.1:"+d.port)}
+	}
+	px := proxyctl.New(env("TOXIPROXY_URL", "http://127.0.0.1:8474"), os.Getenv("TOXIPROXY_AUTH_TOKEN"), proxies)
+	l := lab.New(cfg, st, px)
 	l.Recover()
 	l.Loop(ctx)
 

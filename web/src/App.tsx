@@ -30,10 +30,12 @@ export function App() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [label, setLabel] = useState('')
   const [limitSec, setLimitSec] = useState(600)
+  const [topic, setTopic] = useState<string | null>(null) // 고른 실험 주제. 처음에는 마지막 실험의 주제를 따른다
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
 
-  useEffect(() => { if (lab.live && !settings) setSettings(lab.live.run?.settings ?? lab.live.defaults) }, [lab.live, settings])
+  useEffect(() => { if (lab.live && !settings) setSettings({ ...lab.live.defaults, ...lab.live.run?.settings }) }, [lab.live, settings])
+  useEffect(() => { if (lab.live && topic === null) setTopic(lab.live.run?.scenario || 'stock') }, [lab.live, topic])
   useEffect(() => {
     if (!toast || toast.sticky) return
     const id = setTimeout(() => setToast(null), 5000)
@@ -46,16 +48,23 @@ export function App() {
   }
 
   const coach = useCoach(lab.live && { live: lab.live, traces: lab.live.traces, selection, focusId, tab }, nowUs, (l: Lesson) => {
-    setPast(null); setFocusId(null); setReplaying(false); setPlayUs(null); setSelection(null); setTab('impact')
+    setPast(null); setFocusId(null); setReplaying(false); setPlayUs(null); setSelection(null); setTab('impact'); setTopic(l.topic)
     if (lab.live) setSettings({ ...lab.live.defaults, ...l.settings })
     setLabel(`학습 ${LESSONS.indexOf(l) + 1}. ${l.title}`)
   })
 
   const { live, shown } = lab
-  if (!live || !shown || !settings) return <div className="boot">{lab.connected ? '상태를 불러오는 중입니다.' : '관리 서버에 연결하는 중입니다. 서버가 실행 중인지 확인하세요.'}</div>
+  if (!live || !shown || !settings || topic === null) return <div className="boot">{lab.connected ? '상태를 불러오는 중입니다.' : '관리 서버에 연결하는 중입니다. 서버가 실행 중인지 확인하세요.'}</div>
 
-  const traces = past ? past.traces : shown.traces
-  const faults = past ? past.faults : shown.faults
+  // 화면에 그릴 주제: 과거 실행을 보는 중이면 그 실행의 주제, 실행 중이면 그 실험의 주제, 아니면 고른 주제
+  const going = live.run && live.run.status !== 'ended'
+  const topics = live.topology.scenarios
+  const scenario = topics.find((s) => s.id === (past ? past.run.scenario || 'stock' : going ? live.run!.scenario : topic)) ?? topics[0]
+  // 끝난 실험과 다른 주제를 고르면 그 실험의 요청은 새 그림에 맞지 않으므로 보여 주지 않는다.
+  const stale = !past && !going && (shown.run?.scenario || 'stock') !== scenario.id
+  const traces = past ? past.traces : stale ? [] : shown.traces
+  const faults = past ? past.faults : stale ? [] : shown.faults
+  const tall = scenario.nodes.some((n) => n.row === 0)
   const focus = traces.find((t) => t.traceId === focusId) ?? null
   const pickTrace = (id: string) => { setReplaying(false); setPlayUs(null); setFocusId((c) => (c === id ? null : id)); setTab('calls') }
   const closeFocus = () => { setFocusId(null); setReplaying(false); setPlayUs(null) }
@@ -68,11 +77,11 @@ export function App() {
   }
   const start = () => act(async () => {
     setPast(null); closeFocus(); animator.clear()
-    await api.startRun(label, settings, limitSec)
+    await api.startRun(label, scenario.id, settings, limitSec)
   })
 
   return (
-    <div className="app" data-coach={coach.hint ?? undefined}>
+    <div className={tall ? 'app tall' : 'app'} data-coach={coach.hint ?? undefined}>
       <TopBar live={live} connected={lab.connected} nowUs={nowUs} act={act} busy={busy} onStart={start} onEmergency={emergency} burst={coach.burst} />
       <main className={past ? 'canvas pastview' : 'canvas'}>
         <div className="canvasbar">
@@ -81,18 +90,19 @@ export function App() {
           </button>
           {lab.paused && <span className="badge tone-warn"><TriangleAlert size={13} aria-hidden />화면만 멈춤, 실제 요청은 계속됨 (밀린 변경 {lab.behind}건)</span>}
           {past && <span className="badge tone-live"><HistoryIcon size={13} aria-hidden />과거 실행 {past.run.label || '이름 없음'} {dateTime(past.run.startedUs)}<button className="link" onClick={() => { setPast(null); closeFocus() }}><Undo2 size={13} aria-hidden />현재 실험으로</button></span>}
-          {!shown.proxy.reachable && <span className="badge tone-bad"><TriangleAlert size={13} aria-hidden />장애 주입 프록시에 연결할 수 없음</span>}
+          {Object.values(shown.proxies).some((x) => !x.reachable) && <span className="badge tone-bad"><TriangleAlert size={13} aria-hidden />장애 주입 프록시에 연결할 수 없음</span>}
           <span className="grow" />
           <span className="legend"><i className="l-obs" />관측된 연결<i className="l-cfg" />설정만 된 연결<i className="l-flt" />장애 적용</span>
         </div>
-        <Topology state={shown} traces={traces} faults={faults} past={!!past} selection={selection} onSelect={setSelection} focus={focus} replay={replaying}
+        <Topology state={shown} scenario={scenario} traces={traces} faults={faults} past={!!past} selection={selection} onSelect={setSelection} focus={focus} replay={replaying}
           onReplayTime={setPlayUs} onReplayEnd={() => setReplaying(false)} animator={animator} nowUs={nowUs} />
         <p className="caption">점 하나는 실제 호출 하나입니다. 빠른 호출은 보이도록 늦춰 그리므로 정확한 시간은 숫자와 타임라인을 보세요.</p>
       </main>
       <SidePanel live={live} traces={traces} faults={faults} past={!!past} selection={selection} onSelect={setSelection} settings={settings} setSettings={setSettings}
-        label={label} setLabel={setLabel} limitSec={limitSec} setLimitSec={setLimitSec} nowUs={nowUs} act={act} busy={busy} onTrace={pickTrace} preset={coach.fault} />
+        label={label} setLabel={setLabel} limitSec={limitSec} setLimitSec={setLimitSec} nowUs={nowUs} act={act} busy={busy} onTrace={pickTrace} preset={coach.fault}
+        scenario={scenario} setTopic={(id) => { setTopic(id); setSelection(null); closeFocus() }} />
       <section className="bottom">
-        {coach.open && <Coach c={coach} />}
+        {coach.open && <Coach c={coach} topics={topics} />}
         <div className="bottommain">
         <div className="tabs" role="tablist">
           <button role="tab" data-c="tab-impact" aria-selected={tab === 'impact'} onClick={() => setTab('impact')}><UsersRound size={15} aria-hidden />손님 화면</button>
@@ -103,7 +113,7 @@ export function App() {
           {!coach.open && <button className="learn" onClick={() => coach.setOpen(true)}><GraduationCap size={15} aria-hidden />학습 과정 {coach.done.length}/{LESSONS.length}</button>}
         </div>
         {tab === 'impact' ? (
-          <Impact traces={traces} faults={faults} run={past ? past.run : shown.run} nowUs={nowUs} live={!past && shown.run?.status === 'running'} focusId={focusId}
+          <Impact traces={traces} faults={faults} run={past ? past.run : stale ? null : shown.run} scenario={scenario} nowUs={nowUs} live={!past && shown.run?.status === 'running'} focusId={focusId}
             onFocus={(id) => { setReplaying(false); setPlayUs(null); setFocusId((c) => (c === id ? null : id)) }} onOpen={(id) => { setFocusId(id); setTab('calls') }} />
         ) : tab === 'calls' ? (
           <div className={focus ? 'split' : 'split one'}>
@@ -111,8 +121,8 @@ export function App() {
             {focus && <Timeline key={focus.traceId} trace={focus} faults={faults} playUs={playUs} replaying={replaying} onReplay={() => setReplaying(true)} onClose={closeFocus} />}
           </div>
         ) : (
-          <History refresh={`${live.run?.id}-${live.run?.status}`} onError={onError} onOpen={(d) => { setPast(d); closeFocus(); setTab('calls') }}
-            onLoad={(s, l) => { setSettings(s); setLabel(l); setSelection(null); setToast({ tone: 'ok', text: '조건을 불러왔습니다. 값을 바꾼 뒤 실험을 시작하세요.' }) }} />
+          <History refresh={`${live.run?.id}-${live.run?.status}`} topics={topics} onError={onError} onOpen={(d) => { setPast(d); closeFocus(); setSelection(null); setTab('calls') }}
+            onLoad={(s, l, tp) => { setSettings({ ...live.defaults, ...s }); setLabel(l); setTopic(tp); setSelection(null); setToast({ tone: 'ok', text: '조건을 불러왔습니다. 값을 바꾼 뒤 실험을 시작하세요.' }) }} />
         )}
         </div>
       </section>

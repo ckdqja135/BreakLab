@@ -1,8 +1,9 @@
 import { CircleCheck, ShieldAlert, TriangleAlert, X, Zap } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-import { Badge, clock, faultKind, faultState, faultText, ms, nodeName, reasonLabel, resultLabel, routeLabel, seconds } from '../format'
-import type { Fault, FaultInput, FaultType, LabState, Selection, Settings, Target, Trace } from '../types'
+import { Badge, clock, faultKind, faultState, faultWhat, ms, reasonLabel, resultLabel, routeLabel, seconds } from '../format'
+import { meta } from '../meta'
+import type { Fault, FaultInput, FaultType, LabState, Scenario, Selection, Settings, Target, Trace } from '../types'
 import { Num } from './Field'
 import { edgeStat } from './Topology'
 
@@ -11,6 +12,7 @@ interface Props {
   settings: Settings; setSettings: (s: Settings) => void; label: string; setLabel: (s: string) => void; limitSec: number; setLimitSec: (n: number) => void
   nowUs: number; act: (fn: () => Promise<unknown>) => void; busy: boolean; onTrace: (id: string) => void
   preset: FaultInput | null // 학습 과정이 권하는 장애 값
+  scenario: Scenario; setTopic: (id: string) => void
 }
 
 export function SidePanel(p: Props) {
@@ -28,13 +30,21 @@ export function SidePanel(p: Props) {
   )
 }
 
-function Conditions({ live, settings, setSettings, label, setLabel, limitSec, setLimitSec }: Props) {
+function Conditions({ live, settings, setSettings, label, setLabel, limitSec, setLimitSec, scenario, setTopic }: Props) {
   const running = live.run?.status !== undefined && live.run.status !== 'ended'
   const s = running ? live.run!.settings : settings
   const set = (k: keyof Settings) => (n: number) => setSettings({ ...settings, [k]: n })
+  const has = (id: string) => scenario.nodes.some((n) => n.id === id)
   return (
     <>
       <p className="lead">{running ? '실행 중에는 조건이 고정됩니다. 바꾸려면 실험을 종료하고 다시 시작하세요.' : '이 조건으로 실험을 시작합니다. 조건은 실행 이력에 함께 저장되어 비교할 수 있습니다.'}</p>
+      <h3>실험 주제</h3>
+      <div className="topics" role="radiogroup" aria-label="실험 주제">
+        {live.topology.scenarios.map((sc) => (
+          <button key={sc.id} role="radio" aria-checked={sc.id === scenario.id} disabled={running} onClick={() => setTopic(sc.id)}>{sc.name}</button>
+        ))}
+      </div>
+      <p className="note">{scenario.about}</p>
       <label className="num wide"><span>실험 이름</span>
         <input value={running ? live.run!.label : label} maxLength={60} disabled={running} placeholder="예: 재시도 2회" onChange={(e) => setLabel(e.target.value)} /></label>
       <h3>요청자</h3>
@@ -42,14 +52,21 @@ function Conditions({ live, settings, setSettings, label, setLabel, limitSec, se
         <Num label="전체 타임아웃 ms" value={s.clientTimeoutMs} min={100} max={20000} step={100} disabled={running} onChange={set('clientTimeoutMs')} hint="A 응답을 기다리는 한도" />
         <Num label="실험 시간 제한 초" value={running ? live.run!.limitSec : limitSec} min={10} max={live.limits.maxRunSec} step={10} disabled={running} onChange={setLimitSec} hint="지나면 자동 종료" />
       </div>
-      <h3>Service A의 B 호출</h3>
+      <h3>Service A가 다른 서비스를 부를 때</h3>
       <div className="grid2">
         <Num label="시도별 타임아웃 ms" value={s.callTimeoutMs} min={50} max={10000} step={50} disabled={running} onChange={set('callTimeoutMs')} />
         <Num label="최대 시도 횟수" value={s.maxAttempts} min={1} max={4} disabled={running} onChange={set('maxAttempts')} hint="1이면 재시도 없음" />
         <Num label="재시도 대기 ms" value={s.backoffMs} min={0} max={2000} step={50} disabled={running} onChange={set('backoffMs')} />
+        {has('auth') && <Num label="인증 결과 기억 초" value={s.authCacheSec} min={0} max={120} step={10} disabled={running} onChange={set('authCacheSec')} hint="0이면 매번 인증을 부름" />}
       </div>
-      <h3>Service B</h3>
-      <div className="grid2"><Num label="처리 시간 ms" value={s.workMs} min={0} max={3000} step={5} disabled={running} onChange={set('workMs')} hint="B가 실제로 대기하는 시간" /></div>
+      {has('pay') && (
+        <label className="check"><input type="checkbox" checked={s.idempotent} disabled={running} onChange={(e) => setSettings({ ...settings, idempotent: e.target.checked })} />
+          <span>결제에 멱등 키 붙이기<small>같은 주문의 결제 요청이 다시 와도 결제사가 한 번만 처리합니다.</small></span></label>
+      )}
+      {has('service-b') && <>
+        <h3>Service B</h3>
+        <div className="grid2"><Num label="처리 시간 ms" value={s.workMs} min={0} max={3000} step={5} disabled={running} onChange={set('workMs')} hint="B가 실제로 대기하는 시간" /></div>
+      </>}
       <p className="note">요청 한도: 동시 {live.limits.maxInFlight}개, 실험당 {live.limits.maxRequestsPerRun.toLocaleString()}개. 서비스 사이 연결은 시도마다 새로 맺습니다.</p>
       {live.storeError && <p className="warnbox"><TriangleAlert size={15} aria-hidden />이력 저장 오류: {live.storeError}</p>}
     </>
@@ -80,6 +97,8 @@ function NodeDetail(p: Props & { id: string }) {
     <>
       <h2>{n.name}</h2>
       <p className="lead">{n.role}</p>
+      {n.faults && <FaultControl {...p} target={{ node: p.id }} />}
+      <h3>상태</h3>
       <dl>
         <Row k="주소"><span className="mono">{n.addr}</span></Row>
         {svc && <>
@@ -87,11 +106,11 @@ function NodeDetail(p: Props & { id: string }) {
           {svc.healthError && <Row k="확인 오류"><span className="mono small">{svc.healthError}</span></Row>}
           <Row k="관측 수신">{svc.telemetry === 'ok' ? '수신 중' : svc.telemetry === 'stale' ? '끊김' : '수신 전'} <small>{svc.lastTelemetryUs > 0 && clock(svc.lastTelemetryUs)}</small></Row>
           <Row k="내보내기 오류">{svc.exportErrors}회</Row>
+          {!p.past && svc.gauges?.map((g) => <Row key={g.label} k={g.label}><b className={g.alert ? 'alert' : ''}>{g.value}</b></Row>)}
         </>}
       </dl>
       {svc && svc.health === 'up' && svc.telemetry !== 'ok' && <p className="warnbox"><TriangleAlert size={15} aria-hidden />서비스는 응답하지만 관측 데이터가 오지 않습니다. 서비스 장애가 아니라 관측 경로 문제입니다.</p>}
-      {svc && <p className="note">서비스 응답은 실험 구간을 거치지 않는 별도 경로로 확인합니다.</p>}
-      {p.id === 'service-b' && <FaultControl {...p} target={{ node: p.id }} />}
+      {svc && <p className="note">서비스 응답{svc.gauges?.length ? '과 위의 값' : ''}은 실험 구간을 거치지 않는 별도 경로로 확인합니다.</p>}
       <h3>관련 요청</h3>
       <Recent traces={p.traces} onTrace={p.onTrace} pick={(t) => t.spans.filter((s) => s.service === p.id && s.kind === kind).map((s) => ({ text: kind === 'client' ? '요청' : '처리', result: s.result, us: s.endUs ? s.endUs - s.startUs : 0 }))} />
     </>
@@ -102,9 +121,10 @@ function EdgeDetail(p: Props & { id: string }) {
   const e = p.live.topology.edges.find((x) => x.id === p.id)!
   const st = edgeStat(p.traces, e.id)
   const errs = p.traces.flatMap((t) => t.spans.filter((s) => s.edge === e.id && s.error)).slice(-3).reverse()
+  const px = p.live.proxies[e.id]
   return (
     <>
-      <h2>{nodeName[e.from]} <span aria-hidden>→</span> {nodeName[e.to]}</h2>
+      <h2>{meta(e.from).name} <span aria-hidden>→</span> {meta(e.to).name}</h2>
       {e.proxy ? <FaultControl {...p} target={{ edge: e.id }} /> : <p className="note">이 연결은 프록시를 거치지 않아 장애를 넣을 수 없습니다.</p>}
       <h3>통신 현황</h3>
       <dl>
@@ -113,8 +133,8 @@ function EdgeDetail(p: Props & { id: string }) {
         <Row k="최근 소요 시간">{st.last ? ms(st.last.endUs - st.last.startUs) : '-'}</Row>
         <Row k="최근 호출 경로">{st.last?.route ? routeLabel[st.last.route] : '-'}</Row>
         {e.proxy && <>
-          <Row k="실제 경로"><span className="mono small">A {'>'} {e.proxy.listen} {'>'} {e.proxy.upstream}</span></Row>
-          <Row k="프록시"><span className="mono small">{e.proxy.name}</span> <small>{!p.live.proxy.reachable ? '연결 안 됨' : p.live.proxy.enabled ? '켜짐' : '꺼짐'}, toxic {p.live.proxy.toxics?.length ?? 0}개</small></Row>
+          <Row k="실제 경로"><span className="mono small">{meta(e.from).short} {'>'} {e.proxy.listen} {'>'} {e.proxy.upstream}</span></Row>
+          <Row k="프록시"><span className="mono small">{e.proxy.name}</span> <small>{!px?.reachable ? '연결 안 됨' : px.enabled ? '켜짐' : '꺼짐'}, toxic {px?.toxics?.length ?? 0}개</small></Row>
           <Row k="영향 범위">{e.proxy.edges.length === 1 ? '이 연결만' : `연결 ${e.proxy.edges.length}개가 공유`}. 이 프록시를 지나는 모든 요청에 적용됩니다.</Row>
         </>}
       </dl>
@@ -158,12 +178,17 @@ function FaultControl(p: Props & { target: Target }) {
   const running = p.live.run?.status === 'running'
   const s = running ? p.live.run!.settings : p.settings
   const Cur = cur && faultKind[cur.type].icon
+  // 이 대상을 부르는 쪽. 작업자는 큐가 부르고, 나머지는 A가 부른다.
+  const byQueue = node === 'worker' || edge === 'queue-worker'
+  const caller = byQueue ? '큐' : 'A'
+  const limit = byQueue ? 2000 : s.callTimeoutMs
+  const who = meta(node).short
   return (
     <>
       <h3>장애</h3>
       {cur && Cur ? (
         <div className="faultcard">
-          <b><Cur size={15} aria-hidden />{faultText(cur)}</b>
+          <b><Cur size={15} aria-hidden />{faultWhat(cur)}</b>
           <span>{faultState[cur.state]}{cur.state === 'active' && `, ${seconds(cur.expiresUs - p.nowUs)} 뒤 자동 해제`}</span>
           {cur.appliedUs > 0 && <small>{node ? '요청에 싣기 시작' : '프록시 적용 확인'} {clock(cur.appliedUs)}</small>}
           {cur.cleanup && !cur.cleanup.verified && <small className="alert">{cur.cleanup.detail}</small>}
@@ -180,32 +205,32 @@ function FaultControl(p: Props & { target: Target }) {
           <p className="note">{faultKind[type].about}</p>
           {type === 'latency' && <>
             <div className="seg" role="radiogroup" aria-label="지연 방향">
-              <button role="radio" aria-checked={direction === 'request'} onClick={() => setDirection('request')}>요청 방향 (A에서 B)</button>
-              <button role="radio" aria-checked={direction === 'response'} onClick={() => setDirection('response')}>응답 방향 (B에서 A)</button>
+              <button role="radio" aria-checked={direction === 'request'} onClick={() => setDirection('request')}>요청 방향 (가는 길)</button>
+              <button role="radio" aria-checked={direction === 'response'} onClick={() => setDirection('response')}>응답 방향 (오는 길)</button>
             </div>
             <div className="grid2">
               <Num label="지연 ms" value={latency} min={1} max={limits.maxLatencyMs} step={100} onChange={(n) => { setLatency(n); if (jitter > n) setJitter(n) }} />
               <Num label="흔들림 ±ms" value={jitter} min={0} max={latency} step={10} onChange={setJitter} />
             </div>
-            <p className="note">{latency + jitter >= s.callTimeoutMs ? `A의 시도별 타임아웃 ${s.callTimeoutMs}ms를 넘을 수 있는 값입니다.` : `A의 시도별 타임아웃은 ${s.callTimeoutMs}ms입니다.`}</p>
+            <p className="note">{latency + jitter >= limit ? `${caller}의 시도별 타임아웃 ${limit}ms를 넘을 수 있는 값입니다.` : `${caller}의 시도별 타임아웃은 ${limit}ms입니다.`}</p>
           </>}
-          {type === 'blackhole' && <p className="note">A는 시도마다 {s.callTimeoutMs}ms를 기다린 뒤 포기합니다.</p>}
+          {type === 'blackhole' && <p className="note">{caller}는 시도마다 {limit}ms를 기다린 뒤 포기합니다.</p>}
           {type === 'error' && <>
             <Num label="오류 비율 %" value={percent} min={1} max={100} step={10} onChange={setPercent} />
-            <p className="note">{s.maxAttempts > 1 ? `A는 실패하면 최대 ${s.maxAttempts}번까지 다시 시도합니다.` : 'A는 재시도하지 않는 조건입니다.'}</p>
+            <p className="note">{byQueue ? '큐는 넘기지 못한 작업을 1초 뒤에 다시 넘깁니다.' : s.maxAttempts > 1 ? `A는 실패하면 최대 ${s.maxAttempts}번까지 다시 시도합니다.` : 'A는 재시도하지 않는 조건입니다.'}</p>
           </>}
           {type === 'overload' && <>
             <div className="grid2">
               <Num label="동시 처리 수" value={slots} min={1} max={limits.maxInFlight} onChange={setSlots} />
               <Num label="건당 처리 ms" value={work} min={1} max={3000} step={100} onChange={setWork} />
             </div>
-            <p className="note">B는 초당 약 {((slots * 1000) / work).toFixed(1)}개까지 처리합니다. 그보다 빨리 들어오면 줄이 생깁니다.</p>
+            <p className="note">{who} 서비스는 초당 약 {((slots * 1000) / work).toFixed(1)}개까지 처리합니다. 그보다 빨리 들어오면 줄이 생깁니다.</p>
           </>}
           <Num label="자동 해제 초" value={ttl} min={limits.minFaultTtlSec} max={limits.maxFaultTtlSec} step={5} onChange={setTtl} />
           <button className="inject" data-c="apply" disabled={!running || p.busy}
             onClick={() => p.act(() => api.applyFault({ ...(node ? { node } : { edge }), type, direction, latencyMs: latency, jitterMs: jitter, percent, slots, workMs: work, ttlSec: ttl }))}><Zap size={15} aria-hidden />장애 적용</button>
           {!running && <p className="note">실험을 시작하면 적용할 수 있습니다.</p>}
-          {node && <p className="note">서비스 장애는 요청에 실어 보내고 B가 실제로 그렇게 동작합니다. 적용한 뒤 보내는 요청부터 해당됩니다.</p>}
+          {node && <p className="note">서비스 장애는 요청에 실어 보내고 이 서비스가 실제로 그렇게 동작합니다. 적용한 뒤 보내는 요청부터 해당됩니다.</p>}
         </div>
       )}
       {done.length > 0 && <>
@@ -213,7 +238,7 @@ function FaultControl(p: Props & { target: Target }) {
         <ul className="faultlog">
           {done.map((f) => (
             <li key={f.id}>
-              <b>{faultText(f)}</b>
+              <b>{faultWhat(f)}</b>
               <span>{f.state === 'removed' ? <><CircleCheck size={13} aria-hidden />제거 확인 ({reasonLabel[f.endReason ?? ''] ?? f.endReason})</> : <><TriangleAlert size={13} aria-hidden />적용 실패</>}</span>
               {f.recoveryUs ? <small>제거 확인 후 새로 보낸 첫 성공까지 {ms(f.recoveryUs)}</small> : f.state === 'removed' && <small>제거 후 성공한 요청이 아직 없음</small>}
             </li>

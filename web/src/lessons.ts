@@ -1,6 +1,7 @@
 // 학습 과정. 단계의 완료 여부와 관찰 문장은 모두 실제 실험 상태와 관측값으로 판단한다.
-import { attempts, handled, waited } from './explain'
+import { attempts, charges, handled, notified, queued, waited } from './explain'
 import { human } from './format'
+import { EDGE_FROM, EDGE_TO, meta } from './meta'
 import type { FaultInput, LabState, Selection, Settings, Trace } from './types'
 
 export interface Ctx {
@@ -9,6 +10,7 @@ export interface Ctx {
   selection: Selection
   focusId: string | null
   tab: string
+  topic: string    // 이 과정의 주제
   lessonUs: number // 이 과정을 시작한 시각
   sinceUs: number  // 이 단계가 시작된 시각
 }
@@ -25,24 +27,30 @@ export interface Step {
   done: (c: Ctx) => boolean
   saw?: (c: Ctx) => string
 }
-export interface Lesson { id: string; title: string; goal: string; settings?: Partial<Settings>; steps: Step[]; learned: string[] }
+export interface Lesson { id: string; topic: string; title: string; goal: string; settings?: Partial<Settings>; steps: Step[]; learned: string[] }
 
 const TTL = 240
 const running = (c: Ctx) => c.live.run?.status === 'running'
-const mine = (c: Ctx) => running(c) && c.live.run!.startedUs >= c.lessonUs
-const fresh = (c: Ctx) => c.traces.filter((t) => t.startUs >= c.sinceUs && t.endUs > 0 && t.result !== 'canceled')
+const mine = (c: Ctx) => running(c) && c.live.run!.startedUs >= c.lessonUs && (c.live.run!.scenario || 'stock') === c.topic
+// 이 단계에서 보내 끝난 요청. A가 남긴 기록까지 도착한 것만 센다.
+const settled = (t: Trace) => t.endUs > 0 && !t.spans.some((s) => s.service === 'service-a' && s.endUs === 0)
+const fresh = (c: Ctx) => c.traces.filter((t) => t.startUs >= c.sinceUs && settled(t) && t.result !== 'canceled')
 const same = (a: FaultInput, b: FaultInput) => a.type === b.type && a.edge === b.edge && a.node === b.node
 export const active = (c: Ctx, f: FaultInput) => c.live.faults.some((x) => x.state === 'active' && same(x, f))
 const picked = (c: Ctx, f: FaultInput) => (f.node ? c.selection?.type === 'node' && c.selection.id === f.node : c.selection?.type === 'edge' && c.selection.id === f.edge)
-const where = (f: FaultInput) => (f.node ? "그림에서 'Service B' 상자를 누르세요." : "그림 가운데 '프록시'를 누르세요.")
-const spot = (f: FaultInput) => (f.node ? 'service-b' : 'proxy')
+const where = (f: FaultInput) => (f.node
+  ? `그림에서 '${meta(f.node).name}' 상자를 누르세요.`
+  : `그림에서 ${meta(EDGE_FROM[f.edge!]).short}와 ${meta(EDGE_TO[f.edge!]).short} 사이의 '프록시'를 누르세요.`)
+const spot = (f: FaultInput) => f.node ?? f.edge!
 const bad = (t: Trace) => t.result !== 'ok'
-const tried = (t: Trace, result: string) => attempts(t).some((a) => a.call.result === result)
+const tried = (t: Trace, result: string, edge = 'a-b') => attempts(t, edge).some((a) => a.call.result === result)
+const longest = (ts: Trace[]) => human(Math.max(...ts.map((t) => waited(t, 0))))
+const avg = (ts: Trace[]) => human(ts.reduce((n, t) => n + waited(t, 0), 0) / Math.max(1, ts.length))
 
 const begin: Step = {
   do: (c) => (running(c) && !mine(c) ? "이전 실험이 아직 실행 중입니다. 위쪽 '실험 종료'를 누르세요." : "위쪽 파란 '실험 시작'을 누르세요."),
   hint: (c) => (running(c) && !mine(c) ? 'end' : 'start'),
-  why: '실험을 시작해야 요청과 장애를 보낼 수 있습니다. 조건은 이 과정에 맞게 채워 두었습니다.',
+  why: '실험을 시작해야 요청과 장애를 보낼 수 있습니다. 주제와 조건은 이 과정에 맞게 맞춰 두었습니다.',
   done: mine,
 }
 
@@ -86,7 +94,7 @@ const crowd: Burst = { count: 10, intervalMs: 200, concurrency: 5 }
 
 export const LESSONS: Lesson[] = [
   {
-    id: 'path', title: '요청 하나 따라가기', goal: '요청이 어디를 거쳐 갔다 오는지 봅니다.',
+    id: 'path', topic: 'stock', title: '요청 하나 따라가기', goal: '요청이 어디를 거쳐 갔다 오는지 봅니다.',
     steps: [
       begin,
       send((t) => t.result === 'ok', '진짜 HTTP 요청 하나가 요청 발생기에서 A로, A에서 B로 갑니다. 그림 위의 점을 따라가 보세요.',
@@ -102,7 +110,7 @@ export const LESSONS: Lesson[] = [
     learned: ['점 하나, 막대 하나는 실제 호출 하나입니다.', 'A는 B의 답을 받아야 답할 수 있습니다. 그래서 B가 느려지면 A도 느려집니다.'],
   },
   {
-    id: 'slow', title: '연결이 느려지면', goal: '연결 지연이 손님의 대기 시간으로 이어지는 것을 봅니다.',
+    id: 'slow', topic: 'stock', title: '연결이 느려지면', goal: '연결 지연이 손님의 대기 시간으로 이어지는 것을 봅니다.',
     steps: [
       begin,
       send((t) => t.result === 'ok', '먼저 장애가 없을 때의 속도를 재 둡니다.', (t) => `장애가 없을 때는 ${took(t)}입니다. 이 값을 기억해 두세요.`),
@@ -115,7 +123,7 @@ export const LESSONS: Lesson[] = [
     learned: ['의존하는 서비스와의 연결이 느려지면 그만큼 손님이 더 기다립니다.', '느려졌을 뿐 실패는 아니어서, 실패 수만 보면 이 문제를 놓칩니다. 응답 시간도 함께 봐야 합니다.'],
   },
   {
-    id: 'timeout', title: '타임아웃: 기다림의 한도', goal: '너무 느린 답을 기다리다 포기하는 과정을 봅니다.', settings: { maxAttempts: 1 },
+    id: 'timeout', topic: 'stock', title: '타임아웃: 기다림의 한도', goal: '너무 느린 답을 기다리다 포기하는 과정을 봅니다.', settings: { maxAttempts: 1 },
     steps: [
       begin,
       apply(tooSlow, '지연 1500ms, 응답 방향', 'A는 B를 1000ms까지만 기다립니다. 그보다 긴 1500ms 지연을 겁니다.'),
@@ -127,7 +135,7 @@ export const LESSONS: Lesson[] = [
     learned: ['타임아웃은 손님이 기다리는 시간의 상한선입니다. 없으면 느린 서비스에 끝없이 붙잡힙니다.', 'A가 포기해도 B는 일을 끝낼 수 있습니다. 실패로 보이지만 실제로는 처리된 요청이 생깁니다.'],
   },
   {
-    id: 'retry', title: '재시도: 약이 될 때, 독이 될 때', goal: '같은 재시도가 상황에 따라 정반대 결과를 내는 것을 봅니다.', settings: { maxAttempts: 2, backoffMs: 200 },
+    id: 'retry', topic: 'stock', title: '재시도: 약이 될 때, 독이 될 때', goal: '같은 재시도가 상황에 따라 정반대 결과를 내는 것을 봅니다.', settings: { maxAttempts: 2, backoffMs: 200 },
     steps: [
       begin,
       apply(flaky, '오류 비율 50%', 'B가 절반의 확률로 오류를 냅니다. 잠깐 스치는 일시적 오류와 비슷합니다.'),
@@ -150,7 +158,7 @@ export const LESSONS: Lesson[] = [
     ],
   },
   {
-    id: 'silence', title: '끊김의 두 얼굴', goal: '바로 실패하는 장애와 조용히 매달리는 장애를 비교합니다.', settings: { maxAttempts: 1 },
+    id: 'silence', topic: 'stock', title: '끊김의 두 얼굴', goal: '바로 실패하는 장애와 조용히 매달리는 장애를 비교합니다.', settings: { maxAttempts: 1 },
     steps: [
       begin,
       apply(cut, '연결 차단', 'B로 가는 길을 닫습니다. B 서버가 꺼진 상황과 비슷합니다.'),
@@ -167,7 +175,7 @@ export const LESSONS: Lesson[] = [
     learned: ['바로 거부되는 장애는 빨리 실패해서 오히려 다루기 쉽습니다.', '답이 없는 장애는 타임아웃까지 손님과 A를 붙잡아 둡니다. 타임아웃이 길수록 피해가 커집니다.'],
   },
   {
-    id: 'queue', title: '느린 서비스 하나가 줄을 세운다', goal: '죽지 않은 서비스가 어떻게 장애를 만드는지 봅니다.', settings: { maxAttempts: 2, backoffMs: 200 },
+    id: 'jam', topic: 'stock', title: '느린 서비스 하나가 줄을 세운다', goal: '죽지 않은 서비스가 어떻게 장애를 만드는지 봅니다.', settings: { maxAttempts: 2, backoffMs: 200 },
     steps: [
       begin,
       many(crowd, '먼저 장애 없이 손님 10명을 한꺼번에 보냅니다.', (ts) => `손님 ${ts.length}명 중 ${ts.filter((t) => t.result === 'ok').length}명이 성공했고, 가장 오래 기다린 손님도 ${human(Math.max(...ts.map((t) => waited(t, 0))))}였습니다.`),
@@ -186,3 +194,141 @@ export const LESSONS: Lesson[] = [
     ],
   },
 ]
+
+const cutAuth: FaultInput = { edge: 'a-auth', type: 'cut', ttlSec: TTL }
+const slowPay: FaultInput = { edge: 'a-pay', type: 'latency', direction: 'response', latencyMs: 1500, ttlSec: TTL }
+const cutCache: FaultInput = { edge: 'a-cache', type: 'cut', ttlSec: TTL }
+const mutedCache: FaultInput = { edge: 'a-cache', type: 'blackhole', ttlSec: TTL }
+const cutWorker: FaultInput = { edge: 'queue-worker', type: 'cut', ttlSec: TTL }
+const warm: Burst = { count: 10, intervalMs: 300, concurrency: 1 }
+const rush: Burst = { count: 15, intervalMs: 100, concurrency: 5 }
+const cacheState = (t: Trace) => t.spans.find((s) => s.service === 'service-a' && s.kind === 'server')?.attrs?.['lab.cache']
+const payTries = (t: Trace) => attempts(t, 'a-pay').length
+const unsent = (ts: Trace[]) => ts.filter((t) => queued(t) && !notified(t)).length
+const sentAt = (t: Trace) => Math.max(0, ...attempts(t, 'queue-worker').filter((a) => a.call.result === 'ok').map((a) => a.call.endUs - t.startUs))
+
+LESSONS.push(
+  {
+    id: 'gate', topic: 'auth', title: '모두가 거치는 문', goal: '공통 서비스 하나가 죽으면 전체가 멈추는 것을 봅니다.', settings: { maxAttempts: 1 },
+    steps: [
+      begin,
+      send((t) => t.result === 'ok', '이 주제에서는 A가 먼저 인증에 손님 확인을 맡기고, 그다음 B에 재고를 묻습니다.',
+        (t) => `${t.seq}번 주문은 ${took(t)} 걸렸습니다. A가 인증과 B를 차례로 불렀습니다.`),
+      apply(cutAuth, '연결 차단', '인증으로 가는 길을 끊습니다. 인증 서버가 죽은 상황입니다. B는 건드리지 않습니다.'),
+      many(crowd, '손님 10명을 보냅니다. B는 멀쩡하다는 점을 기억하세요.',
+        (ts) => `손님 ${ts.length}명 중 ${ts.filter(bad).length}명이 실패했습니다. B는 멀쩡하지만 A는 B를 ${ts.reduce((n, t) => n + attempts(t, 'a-b').length, 0)}번 불렀습니다. 인증에서 막혀 B까지 가지도 못했습니다.`, cutAuth),
+      read('그림에서 A와 B 사이에는 요청이 지나가지 않은 것을 확인하세요.', '모든 요청이 거치는 서비스는 하나만 죽어도 전체가 멈춥니다. 이런 곳을 단일 장애점이라고 부릅니다.'),
+      remove(cutAuth, '인증을 되살립니다.'),
+      send((t) => t.result === 'ok', '복구를 확인합니다.', (t) => `${took(t)} 만에 다시 주문이 됩니다.`),
+    ],
+    learned: ['모든 요청이 거치는 서비스가 죽으면, 멀쩡한 다른 서비스까지 쓸모없어집니다.', '그래서 인증 같은 공통 서비스는 여러 대로 늘리거나, 잠깐 죽어도 버틸 방법을 마련합니다.'],
+  },
+  {
+    id: 'remember', topic: 'auth', title: '기억해 두면 버틴다', goal: '인증 결과를 잠깐 기억해 두어 인증 장애를 넘기는 것을 봅니다.', settings: { maxAttempts: 1, authCacheSec: 60 },
+    steps: [
+      begin,
+      send((t) => t.result === 'ok', '이번에는 A가 인증 결과를 60초 동안 기억합니다. 첫 주문에서 인증을 한 번 부릅니다.',
+        (t) => `첫 주문에서 인증을 불렀고 ${took(t)} 걸렸습니다. A는 이 결과를 60초 동안 기억합니다.`),
+      apply(cutAuth, '연결 차단', '앞 과정과 똑같이 인증을 죽입니다.'),
+      many(crowd, '같은 손님 10명을 보냅니다. 앞 과정에서는 모두 실패했습니다.',
+        (ts) => `인증이 죽어 있는데도 손님 ${ts.length}명 중 ${ts.filter((t) => t.result === 'ok').length}명이 주문에 성공했습니다. A가 기억해 둔 결과를 다시 써서 인증을 ${ts.reduce((n, t) => n + attempts(t, 'a-auth').length, 0)}번 불렀습니다.`, cutAuth),
+      read("아래 '손님 화면'의 풀이에서 'A는 조금 전에 확인해 둔 인증 결과를 다시 썼습니다'를 찾아보세요.", '기억하는 시간이 끝나면 다시 인증을 불러야 하고, 그때도 죽어 있으면 실패합니다. 또 그동안은 권한이 바뀌어도 알 수 없습니다.', 'tab-impact'),
+      remove(cutAuth, '인증을 되살립니다.'),
+    ],
+    learned: ['자주 바뀌지 않는 결과를 잠깐 기억해 두면, 그 서비스가 잠시 죽어도 버틸 수 있습니다.', '공짜는 아닙니다. 기억하는 동안은 바뀐 내용을 모릅니다. 얼마나 오래 기억할지가 설계의 핵심입니다.'],
+  },
+  {
+    id: 'slowpay', topic: 'pay', title: '느린 결제가 주문을 막는다', goal: '느린 외부 서비스가 내 서비스를 어떻게 끌어내리는지 봅니다.', settings: { maxAttempts: 1 },
+    steps: [
+      begin,
+      send((t) => t.result === 'ok', 'A가 B에 재고를 묻고, 이어서 외부 결제사에 결제를 요청합니다.',
+        (t) => `${took(t)} 걸렸습니다. 그중 ${human(attempts(t, 'a-pay')[0].call.endUs - attempts(t, 'a-pay')[0].call.startUs)}가 결제를 기다린 시간입니다. 결제사는 원래 느립니다.`),
+      apply(slowPay, '지연 1500ms, 응답 방향', '결제사의 답이 1500ms 늦게 오게 합니다. A의 한도 1000ms보다 깁니다.'),
+      send((t) => bad(t) && tried(t, 'timeout', 'a-pay'), '주문이 어떻게 되는지 봅니다.',
+        (t) => `손님은 ${took(t)}를 기다리고 주문 실패를 봤습니다. 그런데 결제는 ${charges(t)}번 됐습니다. 돈은 빠져나갔는데 주문은 실패했습니다.`, slowPay),
+      read("그림의 결제 상자에 적힌 '실제 결제' 숫자와, 아래 '손님 화면'의 주문 완료 수를 비교해 보세요.", "실패로 보인다고 아무 일도 일어나지 않은 것이 아닙니다. 타임아웃은 '실패'가 아니라 '모른다'는 뜻입니다.", 'tab-impact'),
+      remove(slowPay, '다음 과정을 위해 장애를 없앱니다.'),
+    ],
+    learned: ['외부 서비스가 느려지면 그것을 기다리는 내 서비스도 같이 느려지고 실패합니다.', '타임아웃으로 끝난 요청은 처리됐을 수도, 안 됐을 수도 있습니다. 결제처럼 되돌리기 어려운 일은 결과를 다시 확인하는 절차가 필요합니다.'],
+  },
+  {
+    id: 'twice', topic: 'pay', title: '재시도가 부른 이중 결제', goal: '재시도가 같은 결제를 두 번 일으키는 것을 봅니다.', settings: { maxAttempts: 2, backoffMs: 200 },
+    steps: [
+      begin,
+      apply(slowPay, '지연 1500ms, 응답 방향', '앞 과정과 같은 장애입니다. 다만 이번에는 A가 실패하면 한 번 더 시도합니다.'),
+      send((t) => bad(t) && payTries(t) > 1, '재시도가 결제에 어떤 일을 하는지 봅니다.',
+        (t) => `A가 결제를 ${payTries(t)}번 요청했고, 결제사는 ${charges(t)}번 모두 결제했습니다. 손님은 한 번 주문하고 ${charges(t)}번 결제당했으며, 주문은 실패했습니다.`, slowPay),
+      remove(slowPay, '다음 과정에서 이것을 막는 방법을 봅니다.'),
+    ],
+    learned: ['재시도는 같은 요청을 한 번 더 보내는 것입니다. 첫 요청이 사실은 처리됐다면 두 번 처리됩니다.', '되돌리기 어려운 일에는 재시도를 함부로 붙이면 안 됩니다.'],
+  },
+  {
+    id: 'once', topic: 'pay', title: '멱등 키로 이중 결제 막기', goal: '여러 번 요청해도 한 번만 처리되게 만드는 방법을 봅니다.', settings: { maxAttempts: 2, backoffMs: 200, idempotent: true },
+    steps: [
+      begin,
+      apply(slowPay, '지연 1500ms, 응답 방향', '앞 과정과 장애도 재시도도 같습니다. 다른 점은 A가 결제 요청에 주문 고유 번호(멱등 키)를 붙인다는 것 하나입니다.'),
+      send((t) => bad(t) && payTries(t) > 1, '이번에는 몇 번 결제되는지 봅니다.',
+        (t) => `A가 결제를 ${payTries(t)}번 요청했지만 결제는 ${charges(t)}번만 됐습니다. 결제사가 같은 주문임을 알아보고 두 번째 요청은 새로 결제하지 않았습니다.`, slowPay),
+      read("아래 '손님 화면'의 풀이에서 '다시 결제하지 않았습니다'를 찾아보세요.", '결제사는 이미 본 번호가 오면 저장해 둔 결과만 돌려줍니다. 주문은 여전히 실패로 보이지만, 손님이 다시 주문해도 돈이 두 번 나가지 않습니다.', 'tab-impact'),
+      remove(slowPay, '장애를 없앱니다.'),
+    ],
+    learned: ['여러 번 보내도 한 번 보낸 것과 결과가 같은 성질을 멱등이라고 합니다.', '재시도는 받는 쪽이 멱등일 때만 안전합니다. 멱등 키는 그 약속을 지키는 흔한 방법입니다.'],
+  },
+  {
+    id: 'shield', topic: 'cache', title: '캐시가 죽으면 DB가 맞는다', goal: '캐시가 DB를 얼마나 지켜 주고 있었는지 봅니다.', settings: { maxAttempts: 1 },
+    steps: [
+      begin,
+      many(warm, '상품 5개를 번갈아 조회합니다. 처음에는 캐시에 없어서 DB까지 가고, 그다음부터는 캐시에서 바로 나옵니다.', (ts) => {
+        const miss = ts.filter((t) => cacheState(t) === 'miss'), hit = ts.filter((t) => cacheState(t) === 'hit')
+        return `처음 ${miss.length}번은 캐시에 없어 DB에서 읽었고(평균 ${avg(miss)}), 그 뒤 ${hit.length}번은 캐시에서 바로 꺼냈습니다(평균 ${avg(hit)}).`
+      }),
+      many(rush, '이제 손님 15명을 한꺼번에 보냅니다. 캐시가 있을 때의 모습입니다.', (ts) => `캐시가 있을 때는 손님 ${ts.length}명이 모두 ${longest(ts)} 안에 끝났습니다. DB는 한 번도 부르지 않았습니다.`),
+      apply(cutCache, '연결 차단', '캐시로 가는 길을 끊습니다. A는 캐시를 못 쓰면 DB에서 직접 읽습니다.'),
+      many(rush, '같은 손님 15명을 다시 보냅니다. 그림의 상품 DB 위를 보세요.', (ts) => {
+        const calls = ts.reduce((n, t) => n + attempts(t, 'a-db').length, 0)
+        return `캐시가 죽자 손님 ${ts.length}명이 모두 DB로 몰렸습니다(DB 호출 ${calls}번). 가장 오래 기다린 손님은 ${longest(ts)}, 실패한 손님은 ${ts.filter(bad).length}명입니다. DB는 한 번에 하나, 0.25초씩만 처리할 수 있어 줄이 생겼습니다.`
+      }, cutCache),
+      read("아래 '손님 화면'의 사고 그래프에서 보라색 구간과 그 앞을 비교해 보세요.", '캐시는 속도만 올려 주던 것이 아니라 DB로 가는 요청을 막아 주고 있었습니다. 캐시가 사라지면 DB가 평소의 몇 배를 한꺼번에 받습니다.', 'tab-impact'),
+      remove(cutCache, '캐시를 되살립니다.'),
+      send((t) => t.result === 'ok', '복구를 확인합니다.', (t) => `${took(t)}로 돌아왔습니다. 캐시에 남아 있던 상품을 바로 꺼냈습니다.`),
+    ],
+    learned: ['캐시는 DB의 방패입니다. 캐시가 죽으면 DB가 감당하지 못할 요청이 한꺼번에 몰립니다.', '그래서 캐시 장애는 DB 장애로 번지기 쉽습니다. 캐시가 없을 때 DB로 가는 요청 수를 제한하는 장치가 필요합니다.'],
+  },
+  {
+    id: 'mute', topic: 'cache', title: '느린 캐시는 없는 것보다 나쁘다', goal: '답이 없는 캐시가 죽은 캐시보다 해로운 이유를 봅니다.', settings: { maxAttempts: 1 },
+    steps: [
+      begin,
+      many(warm, '먼저 캐시를 채웁니다.', (ts) => `캐시가 채워졌습니다. 캐시에서 꺼낼 때는 평균 ${avg(ts.filter((t) => cacheState(t) === 'hit'))}입니다.`),
+      apply(cutCache, '연결 차단', '먼저 캐시가 아예 죽은 경우를 봅니다.'),
+      send((t) => t.result === 'ok' && cacheState(t) === 'down', '캐시가 죽었을 때의 속도를 잽니다.', (t) => `캐시가 죽었을 때는 ${took(t)}입니다. 연결이 바로 거부되어 곧장 DB로 갔습니다.`, cutCache),
+      remove(cutCache, '이번에는 죽지는 않았지만 답이 없는 캐시로 바꿉니다.'),
+      apply(mutedCache, '응답 없음', '캐시가 연결은 받아 주되 답을 하지 않습니다. 과부하로 멈춘 캐시 서버와 비슷합니다.'),
+      send((t) => t.result === 'ok' && tried(t, 'timeout', 'a-cache'), '같은 조회를 다시 보냅니다.', (t, c) => {
+        const dead = c.traces.filter((x) => tried(x, 'refused', 'a-cache')).pop()
+        return `이번에는 ${took(t)}입니다. A가 캐시의 답을 한도까지 기다린 뒤에야 DB로 갔습니다.${dead ? ` 캐시가 아예 죽었을 때(${took(dead)})보다 훨씬 느립니다.` : ''}`
+      }, mutedCache),
+      remove(mutedCache, '장애를 없앱니다.'),
+    ],
+    learned: ['답이 없는 캐시는 죽은 캐시보다 해롭습니다. 죽으면 바로 DB로 가지만, 답이 없으면 한도까지 기다립니다.', '캐시를 기다리는 한도는 아주 짧게 잡아야 합니다. 캐시가 느리면 건너뛰는 편이 낫습니다.'],
+  },
+  {
+    id: 'backlog', topic: 'queue', title: '보이지 않는 장애: 큐가 쌓인다', goal: '주문은 멀쩡한데 뒤에서 일이 밀리는 장애를 봅니다.', settings: { maxAttempts: 2, backoffMs: 200 },
+    steps: [
+      begin,
+      send((t) => t.result === 'ok' && notified(t), 'A는 재고를 확인하고 알림 작업을 큐에 넣은 뒤 바로 답합니다. 알림은 작업자가 나중에 보냅니다.',
+        (t) => `손님은 ${took(t)} 만에 주문을 마쳤고, 알림은 주문 ${human(sentAt(t))} 뒤에 나갔습니다. 손님은 알림을 기다리지 않았습니다.`),
+      apply(cutWorker, '연결 차단', '큐에서 작업자로 가는 길을 끊습니다. 작업자가 죽은 상황입니다.'),
+      many({ count: 10, intervalMs: 200, concurrency: 2 }, '손님 10명을 보냅니다. 주문이 되는지, 그림의 큐 상자 숫자가 어떻게 변하는지 보세요.',
+        (ts) => `손님 ${ts.length}명 중 ${ts.filter((t) => t.result === 'ok').length}명이 평소처럼 ${longest(ts)} 안에 주문을 마쳤습니다. 하지만 알림 ${unsent(ts)}건이 큐에 쌓여 있습니다. 손님도, 주문 성공 수도 장애를 알려 주지 않습니다.`, cutWorker),
+      read("그림의 큐 상자에서 '밀린 작업' 숫자를 보세요. 큐 상자를 누르면 오른쪽에서 '가장 오래 기다린 작업'도 볼 수 있습니다.", '큐가 없었다면 주문이 실패했을 것입니다. 큐 덕분에 주문은 살았지만 장애가 숨어 버렸습니다. 그래서 큐 길이와 가장 오래된 작업의 나이를 따로 지켜봅니다.', 'queue'),
+      remove(cutWorker, '작업자를 되살립니다. 밀린 작업이 빠지는 데 얼마나 걸리는지 보세요.'),
+      {
+        do: "큐 상자의 '밀린 작업'이 0개가 될 때까지 지켜보세요.", hint: 'queue',
+        why: '작업자는 알림 하나에 0.3초씩, 차례대로 처리합니다.',
+        done: (c) => c.traces.length > 0 && unsent(c.traces) === 0,
+        saw: (c) => `밀린 알림이 모두 나갔습니다. 가장 늦은 알림은 주문 ${human(Math.max(...c.traces.map(sentAt)))} 뒤에야 도착했습니다. 작업자가 살아난 뒤에도 밀린 일을 다 처리할 때까지는 정상이 아니었습니다.`,
+      },
+    ],
+    learned: ['큐는 뒤쪽 서비스의 장애로부터 앞쪽을 지켜 줍니다. 작업자가 죽어도 주문은 됩니다.', '대신 장애가 눈에 보이지 않게 됩니다. 큐 길이와 가장 오래된 작업의 나이를 지켜봐야 합니다.', '복구는 작업자가 살아난 순간이 아니라 밀린 일이 다 빠진 순간입니다.'],
+  },
+)

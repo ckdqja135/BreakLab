@@ -1,5 +1,6 @@
 import { Badge, clock, ms, nodeName, obsLabel, peerLabel, resultLabel } from '../format'
 import type { Edge, Trace } from '../types'
+import { callName } from './Timeline'
 
 const MAX = 300
 
@@ -19,8 +20,8 @@ export function Calls({ traces, edges, focusId, onPick }: { traces: Trace[]; edg
               <tr key={s.spanId} className={`${t.traceId === focusId ? 'sel' : ''} ${root ? 'root' : ''}`} tabIndex={0} onClick={() => onPick(t.traceId)} onKeyDown={(ev) => ev.key === 'Enter' && onPick(t.traceId)}>
                 <td className="mono">{clock(s.startUs)}</td>
                 <td>{nodeName[s.service] ?? s.service}</td>
-                <td>{e ? nodeName[e.to] : '-'}</td>
-                <td>{root ? `요청 #${t.seq}${t.kind === 'repeat' ? ' (반복)' : ''}` : <span className="sub">#{t.seq} 시도 {s.attrs?.['lab.attempt']}</span>}</td>
+                <td>{e ? nodeName[e.to] ?? e.to : '-'}</td>
+                <td>{root ? `요청 #${t.seq}${t.kind === 'repeat' ? ' (반복)' : ''}` : <span className="sub">#{t.seq} {callName(s)}</span>}</td>
                 <td><Badge label={resultLabel[s.result]} extra={s.result === 'http_error' ? status : undefined} /></td>
                 <td className="r mono">{s.endUs ? ms(s.endUs - s.startUs) : ''}</td>
                 <td>{root ? <Badge label={obsLabel[t.observation]} /> : <span className="sub">{s.peer ? peerLabel[s.peer] : ''}</span>}</td>

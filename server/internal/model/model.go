@@ -14,11 +14,13 @@ import (
 func NowUs() int64 { return time.Now().UnixMicro() }
 
 type Settings struct {
-	ClientTimeoutMs int `json:"clientTimeoutMs"`
-	CallTimeoutMs   int `json:"callTimeoutMs"`
-	MaxAttempts     int `json:"maxAttempts"`
-	BackoffMs       int `json:"backoffMs"`
-	WorkMs          int `json:"workMs"`
+	ClientTimeoutMs int  `json:"clientTimeoutMs"`
+	CallTimeoutMs   int  `json:"callTimeoutMs"`
+	MaxAttempts     int  `json:"maxAttempts"`
+	BackoffMs       int  `json:"backoffMs"`
+	WorkMs          int  `json:"workMs"`
+	AuthCacheSec    int  `json:"authCacheSec"` // A가 인증 결과를 기억하는 시간. 0이면 매번 확인
+	Idempotent      bool `json:"idempotent"`   // A가 결제 요청에 멱등 키를 붙임
 }
 
 var DefaultSettings = Settings{ClientTimeoutMs: 5000, CallTimeoutMs: 1000, MaxAttempts: 2, BackoffMs: 200, WorkMs: 15}
@@ -51,10 +53,11 @@ func inRange(name string, v, min, max int) error {
 func (s Settings) Validate() error {
 	for _, e := range []error{
 		inRange("요청자 전체 타임아웃(ms)", s.ClientTimeoutMs, 100, 20000),
-		inRange("A의 B 호출 타임아웃(ms)", s.CallTimeoutMs, 50, 10000),
+		inRange("A의 호출 타임아웃(ms)", s.CallTimeoutMs, 50, 10000),
 		inRange("최대 시도 횟수", s.MaxAttempts, 1, 4),
 		inRange("재시도 대기(ms)", s.BackoffMs, 0, 2000),
 		inRange("B 처리 시간(ms)", s.WorkMs, 0, 3000),
+		inRange("인증 결과 기억(초)", s.AuthCacheSec, 0, 120),
 	} {
 		if e != nil {
 			return e
@@ -68,6 +71,7 @@ func (s Settings) Policy() wire.Policy {
 	return wire.Policy{
 		CallTimeout: time.Duration(s.CallTimeoutMs) * ms, MaxAttempts: s.MaxAttempts,
 		Backoff: time.Duration(s.BackoffMs) * ms, Work: time.Duration(s.WorkMs) * ms,
+		AuthCacheSec: s.AuthCacheSec, Idempotent: s.Idempotent,
 	}
 }
 
@@ -173,6 +177,7 @@ type Summary struct {
 
 type Run struct {
 	ID        string   `json:"id"`
+	Scenario  string   `json:"scenario"`
 	Label     string   `json:"label"`
 	StartedUs int64    `json:"startedUs"`
 	EndedUs   int64    `json:"endedUs"`
@@ -194,14 +199,15 @@ type Repeat struct {
 }
 
 type ServiceStatus struct {
-	Service       string `json:"service"`
-	Health        string `json:"health"` // up, down, unknown
-	HealthError   string `json:"healthError,omitempty"`
-	HealthUs      int64  `json:"healthCheckedUs"`
-	Telemetry     string `json:"telemetry"` // ok, stale, never
-	TelemetryUs   int64  `json:"lastTelemetryUs"`
-	ExportErrors  int64  `json:"exportErrors"`
-	NotifyDropped int64  `json:"notifyDropped"`
+	Service       string       `json:"service"`
+	Health        string       `json:"health"` // up, down, unknown
+	HealthError   string       `json:"healthError,omitempty"`
+	HealthUs      int64        `json:"healthCheckedUs"`
+	Telemetry     string       `json:"telemetry"` // ok, stale, never
+	TelemetryUs   int64        `json:"lastTelemetryUs"`
+	ExportErrors  int64        `json:"exportErrors"`
+	NotifyDropped int64        `json:"notifyDropped"`
+	Gauges        []wire.Gauge `json:"gauges,omitempty"` // 서비스가 스스로 센 값
 }
 
 type ProxyState struct {
@@ -213,10 +219,12 @@ type ProxyState struct {
 }
 
 type Node struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Role string `json:"role"`
-	Addr string `json:"addr"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Role   string `json:"role"`
+	Addr   string `json:"addr"`
+	Faults bool   `json:"faults,omitempty"` // 서비스 장애를 걸 수 있음
+	Slots  int    `json:"slots,omitempty"`  // 평소 동시에 처리하는 요청 수. 0이면 제한 없음
 }
 
 type EdgeProxy struct {
@@ -234,9 +242,26 @@ type Edge struct {
 	Proxy    *EdgeProxy `json:"proxy,omitempty"`
 }
 
+// Place는 주제 화면에서 서비스가 놓일 자리다.
+type Place struct {
+	ID  string `json:"id"`
+	Col int    `json:"col"`
+	Row int    `json:"row"`
+}
+
+// Scenario는 실험 주제다. 주제마다 쓰는 서비스와 연결이 다르다.
+type Scenario struct {
+	ID    string   `json:"id"`
+	Name  string   `json:"name"`
+	About string   `json:"about"`
+	Nodes []Place  `json:"nodes"`
+	Edges []string `json:"edges"`
+}
+
 type Topology struct {
-	Nodes []Node `json:"nodes"`
-	Edges []Edge `json:"edges"`
+	Nodes     []Node     `json:"nodes"`
+	Edges     []Edge     `json:"edges"`
+	Scenarios []Scenario `json:"scenarios"`
 }
 
 type Event struct {
@@ -269,18 +294,18 @@ func Summarize(traces []Trace) Summary {
 		if t.Observation == ObsPartial || t.Observation == ObsUnknown {
 			s.ObsIncomplete++
 		}
-		n := 0
+		// 요청 발생기를 뺀 모든 서비스 간 호출을 센다.
 		for _, sp := range t.Spans {
-			if sp.Edge == "a-b" && sp.Kind == "client" {
-				n++
-				if sp.Result == wire.ResultTimeout {
-					s.CallTimeouts++
-				}
+			if sp.Kind != "client" || sp.Edge == "" || sp.ParentID == "" {
+				continue
 			}
-		}
-		s.Attempts += n
-		if n > 1 {
-			s.Retries += n - 1
+			s.Attempts++
+			if a := sp.Attrs["lab.attempt"]; a != "" && a != "1" {
+				s.Retries++
+			}
+			if sp.Result == wire.ResultTimeout {
+				s.CallTimeouts++
+			}
 		}
 	}
 	if len(ds) > 0 {

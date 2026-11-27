@@ -2,6 +2,7 @@
 package wire
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,10 +13,12 @@ const (
 	HeaderMaxAttempts = "X-Lab-Max-Attempts"
 	HeaderBackoff     = "X-Lab-Backoff-Ms"
 	HeaderWork        = "X-Lab-Work-Ms"
-	// 아래는 Service B 안에서 일으키는 장애다. A는 받은 값을 그대로 B에 전달한다.
-	HeaderFailPercent = "X-Lab-B-Fail-Percent"
-	HeaderSlots       = "X-Lab-B-Slots"
-	HeaderFaults      = "X-Lab-Fault-Ids"
+	HeaderFlow        = "X-Lab-Flow"       // A가 차례로 부를 단계
+	HeaderRun         = "X-Lab-Run"        // 실험 ID. 서비스가 실험마다 기억을 비우는 기준
+	HeaderAuthCache   = "X-Lab-Auth-Cache" // A가 인증 결과를 기억하는 초
+	HeaderIdempotent  = "X-Lab-Idempotent" // A가 결제에 멱등 키를 붙일지
+	HeaderFaults      = "X-Lab-Faults"     // 서비스 안에서 일으킬 장애. 서비스 ID별 JSON
+	HeaderIdemKey     = "Idempotency-Key"
 )
 
 // 결과 값. span 속성 lab.result에 기록한다.
@@ -30,22 +33,28 @@ const (
 	ResultError     = "error"
 )
 
-// Policy는 A가 B를 호출할 때 쓰는 조건이다. 요청마다 헤더로 전달하므로 실행 중 설정이 섞이지 않는다.
-type Policy struct {
-	CallTimeout time.Duration
-	MaxAttempts int
-	Backoff     time.Duration
-	Work        time.Duration
-	FailPercent int    // B가 오류로 응답하는 비율. 0이면 끔
-	Slots       int    // B가 동시에 처리하는 요청 수. 0이면 제한 없음
-	Faults      string // 이 요청에 실린 서비스 장애 ID 목록(쉼표 구분)
+// ServiceFault는 한 서비스가 요청을 처리할 때 실제로 따르는 장애 지시다.
+type ServiceFault struct {
+	ID          string `json:"id"`
+	FailPercent int    `json:"fail,omitempty"`  // 오류로 응답하는 비율
+	Slots       int    `json:"slots,omitempty"` // 동시에 처리하는 요청 수
+	WorkMs      int    `json:"work,omitempty"`  // 요청 하나의 처리 시간
 }
 
-func clampHeader(h http.Header, key string, def, min, max int) int {
-	n, err := strconv.Atoi(h.Get(key))
-	if err != nil {
-		return def
-	}
+// Policy는 요청 하나가 서비스들을 지나며 따르는 조건이다. 요청마다 헤더로 전달하므로 실행 중 설정이 섞이지 않는다.
+type Policy struct {
+	CallTimeout  time.Duration
+	MaxAttempts  int
+	Backoff      time.Duration
+	Work         time.Duration // B의 처리 시간
+	Flow         string
+	Run          string
+	AuthCacheSec int
+	Idempotent   bool
+	Faults       map[string]ServiceFault
+}
+
+func clamp(n, min, max int) int {
 	if n < min {
 		return min
 	}
@@ -55,51 +64,67 @@ func clampHeader(h http.Header, key string, def, min, max int) int {
 	return n
 }
 
-// ParsePolicy는 서비스 쪽에서도 상한을 다시 적용한다.
-func ParsePolicy(h http.Header) Policy {
-	ms := time.Millisecond
-	return Policy{
-		CallTimeout: time.Duration(clampHeader(h, HeaderCallTimeout, 1000, 50, 10000)) * ms,
-		MaxAttempts: clampHeader(h, HeaderMaxAttempts, 1, 1, 4),
-		Backoff:     time.Duration(clampHeader(h, HeaderBackoff, 200, 0, 2000)) * ms,
-		Work:        time.Duration(clampHeader(h, HeaderWork, 15, 0, 3000)) * ms,
-		FailPercent: clampHeader(h, HeaderFailPercent, 0, 0, 100),
-		Slots:       clampHeader(h, HeaderSlots, 0, 0, 5),
-		Faults:      faultIDs(h.Get(HeaderFaults)),
+func clampHeader(h http.Header, key string, def, min, max int) int {
+	n, err := strconv.Atoi(h.Get(key))
+	if err != nil {
+		return def
 	}
+	return clamp(n, min, max)
 }
 
-// faultIDs는 관리 서버가 만든 ID 형식(16진수와 쉼표)만 통과시킨다.
-func faultIDs(v string) string {
-	if len(v) > 64 {
+// token은 영문 소문자, 숫자, 쉼표, 줄표만 통과시킨다.
+func token(v string, max int) string {
+	if len(v) > max {
 		return ""
 	}
 	for _, c := range v {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c == ',') {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c == ',' || c == '-') {
 			return ""
 		}
 	}
 	return v
 }
 
+// ParsePolicy는 서비스 쪽에서도 상한을 다시 적용한다.
+func ParsePolicy(h http.Header) Policy {
+	ms := time.Millisecond
+	p := Policy{
+		CallTimeout:  time.Duration(clampHeader(h, HeaderCallTimeout, 1000, 50, 10000)) * ms,
+		MaxAttempts:  clampHeader(h, HeaderMaxAttempts, 1, 1, 4),
+		Backoff:      time.Duration(clampHeader(h, HeaderBackoff, 200, 0, 2000)) * ms,
+		Work:         time.Duration(clampHeader(h, HeaderWork, 15, 0, 3000)) * ms,
+		Flow:         token(h.Get(HeaderFlow), 64),
+		Run:          token(h.Get(HeaderRun), 32),
+		AuthCacheSec: clampHeader(h, HeaderAuthCache, 0, 0, 120),
+		Idempotent:   h.Get(HeaderIdempotent) == "1",
+	}
+	if v := h.Get(HeaderFaults); v != "" && len(v) <= 1024 {
+		var m map[string]ServiceFault
+		if json.Unmarshal([]byte(v), &m) == nil {
+			p.Faults = map[string]ServiceFault{}
+			for k, f := range m {
+				p.Faults[token(k, 32)] = ServiceFault{ID: token(f.ID, 32), FailPercent: clamp(f.FailPercent, 0, 100), Slots: clamp(f.Slots, 0, 5), WorkMs: clamp(f.WorkMs, 0, 3000)}
+			}
+		}
+	}
+	return p
+}
+
+// Apply는 다음 서비스로 보낼 요청에 조건을 그대로 옮겨 싣는다.
 func (p Policy) Apply(h http.Header) {
 	h.Set(HeaderCallTimeout, strconv.FormatInt(p.CallTimeout.Milliseconds(), 10))
 	h.Set(HeaderMaxAttempts, strconv.Itoa(p.MaxAttempts))
 	h.Set(HeaderBackoff, strconv.FormatInt(p.Backoff.Milliseconds(), 10))
 	h.Set(HeaderWork, strconv.FormatInt(p.Work.Milliseconds(), 10))
-	p.ApplyService(h)
-}
-
-// ApplyService는 B 안에서 일으킬 장애만 싣는다. 장애가 없으면 헤더를 붙이지 않는다.
-func (p Policy) ApplyService(h http.Header) {
-	if p.FailPercent > 0 {
-		h.Set(HeaderFailPercent, strconv.Itoa(p.FailPercent))
+	h.Set(HeaderFlow, p.Flow)
+	h.Set(HeaderRun, p.Run)
+	h.Set(HeaderAuthCache, strconv.Itoa(p.AuthCacheSec))
+	if p.Idempotent {
+		h.Set(HeaderIdempotent, "1")
 	}
-	if p.Slots > 0 {
-		h.Set(HeaderSlots, strconv.Itoa(p.Slots))
-	}
-	if p.Faults != "" {
-		h.Set(HeaderFaults, p.Faults)
+	if len(p.Faults) > 0 {
+		b, _ := json.Marshal(p.Faults)
+		h.Set(HeaderFaults, string(b))
 	}
 }
 
@@ -108,4 +133,11 @@ type Heartbeat struct {
 	Service       string `json:"service"`
 	ExportErrors  int64  `json:"exportErrors"`
 	NotifyDropped int64  `json:"notifyDropped"`
+}
+
+// Gauge는 서비스가 스스로 센 값이다. 관리 서버가 관리 경로로 읽어 화면에 그대로 보여 준다.
+type Gauge struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Alert bool   `json:"alert,omitempty"`
 }
