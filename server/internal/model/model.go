@@ -128,14 +128,19 @@ type Cleanup struct {
 }
 
 // Fault 상태: applying, active, removing, removed, apply_failed, cleanup_failed
+// 연결 장애(latency, cut, blackhole, reset)는 Edge에, 서비스 장애(error, overload)는 Node에 건다.
 type Fault struct {
 	ID          string   `json:"id"`
 	RunID       string   `json:"runId"`
-	Edge        string   `json:"edge"`
-	Type        string   `json:"type"`                // latency, cut
+	Edge        string   `json:"edge,omitempty"`
+	Node        string   `json:"node,omitempty"`
+	Type        string   `json:"type"`
 	Direction   string   `json:"direction,omitempty"` // request(A에서 B), response(B에서 A)
 	LatencyMs   int      `json:"latencyMs,omitempty"`
 	JitterMs    int      `json:"jitterMs,omitempty"`
+	Percent     int      `json:"percent,omitempty"` // error: 오류로 응답하는 비율
+	Slots       int      `json:"slots,omitempty"`   // overload: 동시에 처리하는 요청 수
+	WorkMs      int      `json:"workMs,omitempty"`  // overload: 요청 하나의 처리 시간
 	TTLSec      int      `json:"ttlSec"`
 	State       string   `json:"state"`
 	RequestedUs int64    `json:"requestedUs"`

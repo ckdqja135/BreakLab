@@ -120,8 +120,16 @@ func (c *Ctl) Apply(f model.Fault) error {
 	if f.Direction == "request" {
 		stream = "upstream"
 	}
+	kind, attrs := "latency", toxi.Attributes{"latency": f.LatencyMs, "jitter": f.JitterMs}
+	// 아래 둘은 요청 방향에만 건다. 응답 방향에 걸면 B가 응답 뒤 연결을 닫는 순간 함께 닫혀 의도와 다르게 동작한다.
+	switch f.Type {
+	case "blackhole": // 요청을 버리고 연결은 열어 둔다.
+		kind, attrs, stream = "timeout", toxi.Attributes{"timeout": 0}, "upstream"
+	case "reset": // 요청이 지나가는 순간 연결을 강제로 끊는다.
+		kind, attrs, stream = "reset_peer", toxi.Attributes{"timeout": 0}, "upstream"
+	}
 	return bounded(func() error {
-		_, err := p.AddToxic(ToxicName(f), "latency", stream, 1, toxi.Attributes{"latency": f.LatencyMs, "jitter": f.JitterMs})
+		_, err := p.AddToxic(ToxicName(f), kind, stream, 1, attrs)
 		return err
 	})
 }

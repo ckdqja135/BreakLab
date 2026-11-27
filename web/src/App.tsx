@@ -1,4 +1,4 @@
-import { CirclePause, CirclePlay, CircleCheck, History as HistoryIcon, ListTree, TriangleAlert, Undo2, X } from 'lucide-react'
+import { CirclePause, CirclePlay, CircleCheck, GraduationCap, History as HistoryIcon, ListTree, TriangleAlert, Undo2, UsersRound, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { LiveAnimator } from './anim'
 import { api } from './api'
@@ -6,6 +6,9 @@ import { dateTime } from './format'
 import type { RunDetail, Selection, Settings } from './types'
 import { useLab, useNowUs } from './useLab'
 import { Calls } from './components/Calls'
+import { Coach, useCoach } from './components/Coach'
+import { Impact } from './components/Impact'
+import { LESSONS, type Lesson } from './lessons'
 import { History } from './components/History'
 import { SidePanel } from './components/SidePanel'
 import { Timeline } from './components/Timeline'
@@ -22,7 +25,7 @@ export function App() {
   const [focusId, setFocusId] = useState<string | null>(null)
   const [replaying, setReplaying] = useState(false)
   const [playUs, setPlayUs] = useState<number | null>(null)
-  const [tab, setTab] = useState<'calls' | 'history'>('calls')
+  const [tab, setTab] = useState<'impact' | 'calls' | 'history'>('impact')
   const [past, setPast] = useState<RunDetail | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
   const [label, setLabel] = useState('')
@@ -41,6 +44,12 @@ export function App() {
     setBusy(true)
     try { await fn() } catch (e) { onError((e as Error).message) } finally { setBusy(false) }
   }
+
+  const coach = useCoach(lab.live && { live: lab.live, traces: lab.live.traces, selection, focusId, tab }, nowUs, (l: Lesson) => {
+    setPast(null); setFocusId(null); setReplaying(false); setPlayUs(null); setSelection(null); setTab('impact')
+    if (lab.live) setSettings({ ...lab.live.defaults, ...l.settings })
+    setLabel(`학습 ${LESSONS.indexOf(l) + 1}. ${l.title}`)
+  })
 
   const { live, shown } = lab
   if (!live || !shown || !settings) return <div className="boot">{lab.connected ? '상태를 불러오는 중입니다.' : '관리 서버에 연결하는 중입니다. 서버가 실행 중인지 확인하세요.'}</div>
@@ -63,8 +72,8 @@ export function App() {
   })
 
   return (
-    <div className="app">
-      <TopBar live={live} connected={lab.connected} nowUs={nowUs} act={act} busy={busy} onStart={start} onEmergency={emergency} />
+    <div className="app" data-coach={coach.hint ?? undefined}>
+      <TopBar live={live} connected={lab.connected} nowUs={nowUs} act={act} busy={busy} onStart={start} onEmergency={emergency} burst={coach.burst} />
       <main className={past ? 'canvas pastview' : 'canvas'}>
         <div className="canvasbar">
           <button onClick={() => { animator.clear(); lab.setPaused(!lab.paused) }} aria-pressed={lab.paused}>
@@ -81,15 +90,22 @@ export function App() {
         <p className="caption">점 하나는 실제 호출 하나입니다. 빠른 호출은 보이도록 늦춰 그리므로 정확한 시간은 숫자와 타임라인을 보세요.</p>
       </main>
       <SidePanel live={live} traces={traces} faults={faults} past={!!past} selection={selection} onSelect={setSelection} settings={settings} setSettings={setSettings}
-        label={label} setLabel={setLabel} limitSec={limitSec} setLimitSec={setLimitSec} nowUs={nowUs} act={act} busy={busy} onTrace={pickTrace} />
+        label={label} setLabel={setLabel} limitSec={limitSec} setLimitSec={setLimitSec} nowUs={nowUs} act={act} busy={busy} onTrace={pickTrace} preset={coach.fault} />
       <section className="bottom">
+        {coach.open && <Coach c={coach} />}
+        <div className="bottommain">
         <div className="tabs" role="tablist">
-          <button role="tab" aria-selected={tab === 'calls'} onClick={() => setTab('calls')}><ListTree size={15} aria-hidden />요청 흐름</button>
+          <button role="tab" data-c="tab-impact" aria-selected={tab === 'impact'} onClick={() => setTab('impact')}><UsersRound size={15} aria-hidden />손님 화면</button>
+          <button role="tab" data-c="tab-calls" aria-selected={tab === 'calls'} onClick={() => setTab('calls')}><ListTree size={15} aria-hidden />요청 흐름</button>
           <button role="tab" aria-selected={tab === 'history'} onClick={() => setTab('history')}><HistoryIcon size={15} aria-hidden />실행 이력과 비교</button>
           <span className="grow" />
-          {tab === 'calls' && <Totals s={past ? past.run.summary : shown.run?.summary} />}
+          {tab !== 'history' && <Totals s={past ? past.run.summary : shown.run?.summary} />}
+          {!coach.open && <button className="learn" onClick={() => coach.setOpen(true)}><GraduationCap size={15} aria-hidden />학습 과정 {coach.done.length}/{LESSONS.length}</button>}
         </div>
-        {tab === 'calls' ? (
+        {tab === 'impact' ? (
+          <Impact traces={traces} faults={faults} run={past ? past.run : shown.run} nowUs={nowUs} live={!past && shown.run?.status === 'running'} focusId={focusId}
+            onFocus={(id) => { setReplaying(false); setPlayUs(null); setFocusId((c) => (c === id ? null : id)) }} onOpen={(id) => { setFocusId(id); setTab('calls') }} />
+        ) : tab === 'calls' ? (
           <div className={focus ? 'split' : 'split one'}>
             <Calls traces={traces} edges={live.topology.edges} focusId={focusId} onPick={pickTrace} />
             {focus && <Timeline key={focus.traceId} trace={focus} faults={faults} playUs={playUs} replaying={replaying} onReplay={() => setReplaying(true)} onClose={closeFocus} />}
@@ -98,6 +114,7 @@ export function App() {
           <History refresh={`${live.run?.id}-${live.run?.status}`} onError={onError} onOpen={(d) => { setPast(d); closeFocus(); setTab('calls') }}
             onLoad={(s, l) => { setSettings(s); setLabel(l); setSelection(null); setToast({ tone: 'ok', text: '조건을 불러왔습니다. 값을 바꾼 뒤 실험을 시작하세요.' }) }} />
         )}
+        </div>
       </section>
       {toast && <div className={`toast tone-${toast.tone}`} role="alert">{toast.tone === 'ok' ? <CircleCheck size={17} aria-hidden /> : <TriangleAlert size={17} aria-hidden />}<span>{toast.text}</span><button className="icon" aria-label="알림 닫기" onClick={() => setToast(null)}><X size={15} /></button></div>}
     </div>

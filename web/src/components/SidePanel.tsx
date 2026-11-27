@@ -1,8 +1,8 @@
-import { CircleCheck, ShieldAlert, Timer, TriangleAlert, Unplug, X, Zap } from 'lucide-react'
-import { useState } from 'react'
+import { CircleCheck, ShieldAlert, TriangleAlert, X, Zap } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
-import { Badge, clock, faultState, faultText, ms, nodeName, reasonLabel, resultLabel, routeLabel, seconds } from '../format'
-import type { Fault, LabState, Selection, Settings, Trace } from '../types'
+import { Badge, clock, faultKind, faultState, faultText, ms, nodeName, reasonLabel, resultLabel, routeLabel, seconds } from '../format'
+import type { Fault, FaultInput, FaultType, LabState, Selection, Settings, Target, Trace } from '../types'
 import { Num } from './Field'
 import { edgeStat } from './Topology'
 
@@ -10,6 +10,7 @@ interface Props {
   live: LabState; traces: Trace[]; faults: Fault[]; past: boolean; selection: Selection; onSelect: (s: Selection) => void
   settings: Settings; setSettings: (s: Settings) => void; label: string; setLabel: (s: string) => void; limitSec: number; setLimitSec: (n: number) => void
   nowUs: number; act: (fn: () => Promise<unknown>) => void; busy: boolean; onTrace: (id: string) => void
+  preset: FaultInput | null // 학습 과정이 권하는 장애 값
 }
 
 export function SidePanel(p: Props) {
@@ -90,6 +91,7 @@ function NodeDetail(p: Props & { id: string }) {
       </dl>
       {svc && svc.health === 'up' && svc.telemetry !== 'ok' && <p className="warnbox"><TriangleAlert size={15} aria-hidden />서비스는 응답하지만 관측 데이터가 오지 않습니다. 서비스 장애가 아니라 관측 경로 문제입니다.</p>}
       {svc && <p className="note">서비스 응답은 실험 구간을 거치지 않는 별도 경로로 확인합니다.</p>}
+      {p.id === 'service-b' && <FaultControl {...p} target={{ node: p.id }} />}
       <h3>관련 요청</h3>
       <Recent traces={p.traces} onTrace={p.onTrace} pick={(t) => t.spans.filter((s) => s.service === p.id && s.kind === kind).map((s) => ({ text: kind === 'client' ? '요청' : '처리', result: s.result, us: s.endUs ? s.endUs - s.startUs : 0 }))} />
     </>
@@ -103,7 +105,7 @@ function EdgeDetail(p: Props & { id: string }) {
   return (
     <>
       <h2>{nodeName[e.from]} <span aria-hidden>→</span> {nodeName[e.to]}</h2>
-      {e.proxy ? <FaultControl {...p} edge={e.id} /> : <p className="note">이 연결은 프록시를 거치지 않아 장애를 넣을 수 없습니다.</p>}
+      {e.proxy ? <FaultControl {...p} target={{ edge: e.id }} /> : <p className="note">이 연결은 프록시를 거치지 않아 장애를 넣을 수 없습니다.</p>}
       <h3>통신 현황</h3>
       <dl>
         <Row k="프로토콜">{e.protocol}</Row>
@@ -122,34 +124,60 @@ function EdgeDetail(p: Props & { id: string }) {
   )
 }
 
-function FaultControl(p: Props & { edge: string }) {
-  const [type, setType] = useState<'latency' | 'cut'>('latency')
+const EDGE_TYPES: FaultType[] = ['latency', 'cut', 'blackhole', 'reset']
+const NODE_TYPES: FaultType[] = ['error', 'overload']
+
+function FaultControl(p: Props & { target: Target }) {
+  const node = 'node' in p.target ? p.target.node : undefined
+  const edge = 'edge' in p.target ? p.target.edge : undefined
+  const types = node ? NODE_TYPES : EDGE_TYPES
+  const [type, setType] = useState<FaultType>(types[0])
   const [direction, setDirection] = useState<'request' | 'response'>('response')
   const [latency, setLatency] = useState(300)
   const [jitter, setJitter] = useState(0)
+  const [percent, setPercent] = useState(50)
+  const [slots, setSlots] = useState(1)
+  const [work, setWork] = useState(600)
   const [ttl, setTtl] = useState(60)
+  const mine = (f: FaultInput) => (node ? f.node === node : f.edge === edge)
+  useEffect(() => {
+    const v = p.preset
+    if (!v || !mine(v)) return
+    setType(v.type); setJitter(v.jitterMs ?? 0)
+    if (v.direction) setDirection(v.direction)
+    if (v.latencyMs) setLatency(v.latencyMs)
+    if (v.percent) setPercent(v.percent)
+    if (v.slots) setSlots(v.slots)
+    if (v.workMs) setWork(v.workMs)
+    setTtl(v.ttlSec)
+  }, [p.preset])
   const { limits } = p.live
-  const cur = p.live.faults.find((f) => f.edge === p.edge && !['removed', 'apply_failed'].includes(f.state))
-  const done = p.faults.filter((f) => ['removed', 'apply_failed'].includes(f.state)).slice(-3).reverse()
+  const over = ['removed', 'apply_failed']
+  const cur = p.live.faults.find((f) => mine(f) && !over.includes(f.state))
+  const done = p.faults.filter((f) => mine(f) && over.includes(f.state)).slice(-3).reverse()
   const running = p.live.run?.status === 'running'
-  const s = p.live.run?.status === 'running' ? p.live.run.settings : p.settings
+  const s = running ? p.live.run!.settings : p.settings
+  const Cur = cur && faultKind[cur.type].icon
   return (
     <>
       <h3>장애</h3>
-      {cur ? (
+      {cur && Cur ? (
         <div className="faultcard">
-          <b>{cur.type === 'cut' ? <Unplug size={15} aria-hidden /> : <Timer size={15} aria-hidden />}{faultText(cur)}</b>
+          <b><Cur size={15} aria-hidden />{faultText(cur)}</b>
           <span>{faultState[cur.state]}{cur.state === 'active' && `, ${seconds(cur.expiresUs - p.nowUs)} 뒤 자동 해제`}</span>
-          {cur.appliedUs > 0 && <small>프록시 적용 확인 {clock(cur.appliedUs)}</small>}
+          {cur.appliedUs > 0 && <small>{node ? '요청에 싣기 시작' : '프록시 적용 확인'} {clock(cur.appliedUs)}</small>}
           {cur.cleanup && !cur.cleanup.verified && <small className="alert">{cur.cleanup.detail}</small>}
-          <button disabled={p.busy || cur.state === 'applying' || cur.state === 'removing'} onClick={() => p.act(() => api.removeFault(cur.id))}><X size={15} aria-hidden />장애 제거</button>
+          <button data-c="remove" disabled={p.busy || cur.state === 'applying' || cur.state === 'removing'} onClick={() => p.act(() => api.removeFault(cur.id))}><X size={15} aria-hidden />장애 제거</button>
         </div>
       ) : (
         <div className="faultform">
-          <div className="seg" role="radiogroup" aria-label="장애 유형">
-            <button role="radio" aria-checked={type === 'latency'} onClick={() => setType('latency')}><Timer size={14} aria-hidden />지연</button>
-            <button role="radio" aria-checked={type === 'cut'} onClick={() => setType('cut')}><Unplug size={14} aria-hidden />연결 차단</button>
+          <div className={`seg ${types.length > 2 ? 'two' : ''}`} role="radiogroup" aria-label="장애 유형">
+            {types.map((t) => {
+              const Icon = faultKind[t].icon
+              return <button key={t} role="radio" aria-checked={type === t} onClick={() => setType(t)}><Icon size={14} aria-hidden />{faultKind[t].name}</button>
+            })}
           </div>
+          <p className="note">{faultKind[type].about}</p>
           {type === 'latency' && <>
             <div className="seg" role="radiogroup" aria-label="지연 방향">
               <button role="radio" aria-checked={direction === 'request'} onClick={() => setDirection('request')}>요청 방향 (A에서 B)</button>
@@ -161,10 +189,23 @@ function FaultControl(p: Props & { edge: string }) {
             </div>
             <p className="note">{latency + jitter >= s.callTimeoutMs ? `A의 시도별 타임아웃 ${s.callTimeoutMs}ms를 넘을 수 있는 값입니다.` : `A의 시도별 타임아웃은 ${s.callTimeoutMs}ms입니다.`}</p>
           </>}
-          {type === 'cut' && <p className="note">프록시를 닫습니다. 열려 있던 연결은 끊기고 새 연결은 거부됩니다.</p>}
+          {type === 'blackhole' && <p className="note">A는 시도마다 {s.callTimeoutMs}ms를 기다린 뒤 포기합니다.</p>}
+          {type === 'error' && <>
+            <Num label="오류 비율 %" value={percent} min={1} max={100} step={10} onChange={setPercent} />
+            <p className="note">{s.maxAttempts > 1 ? `A는 실패하면 최대 ${s.maxAttempts}번까지 다시 시도합니다.` : 'A는 재시도하지 않는 조건입니다.'}</p>
+          </>}
+          {type === 'overload' && <>
+            <div className="grid2">
+              <Num label="동시 처리 수" value={slots} min={1} max={limits.maxInFlight} onChange={setSlots} />
+              <Num label="건당 처리 ms" value={work} min={1} max={3000} step={100} onChange={setWork} />
+            </div>
+            <p className="note">B는 초당 약 {((slots * 1000) / work).toFixed(1)}개까지 처리합니다. 그보다 빨리 들어오면 줄이 생깁니다.</p>
+          </>}
           <Num label="자동 해제 초" value={ttl} min={limits.minFaultTtlSec} max={limits.maxFaultTtlSec} step={5} onChange={setTtl} />
-          <button className="inject" disabled={!running || p.busy} onClick={() => p.act(() => api.applyFault({ edge: p.edge, type, direction, latencyMs: latency, jitterMs: jitter, ttlSec: ttl }))}><Zap size={15} aria-hidden />장애 적용</button>
+          <button className="inject" data-c="apply" disabled={!running || p.busy}
+            onClick={() => p.act(() => api.applyFault({ ...(node ? { node } : { edge }), type, direction, latencyMs: latency, jitterMs: jitter, percent, slots, workMs: work, ttlSec: ttl }))}><Zap size={15} aria-hidden />장애 적용</button>
           {!running && <p className="note">실험을 시작하면 적용할 수 있습니다.</p>}
+          {node && <p className="note">서비스 장애는 요청에 실어 보내고 B가 실제로 그렇게 동작합니다. 적용한 뒤 보내는 요청부터 해당됩니다.</p>}
         </div>
       )}
       {done.length > 0 && <>

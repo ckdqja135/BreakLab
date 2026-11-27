@@ -1,5 +1,5 @@
-import { Ban, CircleAlert, CircleCheck, CircleHelp, CircleX, Eye, EyeOff, LoaderCircle, TimerOff, Unplug, type LucideIcon } from 'lucide-react'
-import type { Fault, Observation, Peer, Result, Route } from './types'
+import { Ban, Bug, CircleAlert, CircleCheck, CircleHelp, CircleX, Eye, EyeOff, Ghost, Hourglass, LoaderCircle, Scissors, Timer, TimerOff, Unplug, type LucideIcon } from 'lucide-react'
+import type { Fault, FaultInput, FaultType, Observation, Peer, Result, Route } from './types'
 
 export function ms(us: number | undefined): string {
   if (us === undefined || us < 0) return '-'
@@ -53,8 +53,30 @@ export const reasonLabel: Record<string, string> = {
 }
 export const nodeName: Record<string, string> = { generator: '요청 발생기', 'service-a': 'Service A', 'service-b': 'Service B' }
 
-export const faultText = (f: Fault) =>
-  f.type === 'cut' ? '연결 차단' : `지연 ${f.latencyMs?.toLocaleString()}ms${f.jitterMs ? ` ±${f.jitterMs}` : ''} (${f.direction === 'request' ? '요청 방향' : '응답 방향'})`
+// 사람이 체감하는 시간. 표의 정확한 값은 ms()를 쓴다.
+export const human = (us: number) => {
+  const s = Math.max(0, us) / 1e6
+  return `${s.toFixed(s < 0.01 ? 3 : s < 1 ? 2 : 1)}초`
+}
+
+export const faultKind: Record<FaultType, { name: string; icon: LucideIcon; about: string }> = {
+  latency: { name: '지연', icon: Timer, about: '지나가는 데이터를 정해진 시간만큼 늦춥니다.' },
+  cut: { name: '연결 차단', icon: Unplug, about: '프록시를 닫습니다. 열려 있던 연결은 끊기고 새 연결은 바로 거부됩니다.' },
+  blackhole: { name: '응답 없음', icon: Ghost, about: '연결은 받아 주지만 요청을 버립니다. B에는 아무것도 닿지 않고, A는 타임아웃까지 기다립니다.' },
+  reset: { name: '연결 리셋', icon: Scissors, about: '요청이 지나가는 순간 연결을 강제로 끊습니다.' },
+  error: { name: '오류 응답', icon: Bug, about: 'B가 정해진 비율로 HTTP 500을 응답합니다. 버그가 섞인 배포와 비슷합니다.' },
+  overload: { name: '과부하', icon: Hourglass, about: 'B가 한 번에 몇 개만 처리하고 나머지는 줄을 세웁니다. 느려진 DB나 꽉 찬 서버와 비슷합니다.' },
+}
+
+export const faultText = (f: FaultInput) => {
+  switch (f.type) {
+    case 'latency': return `지연 ${f.latencyMs?.toLocaleString()}ms${f.jitterMs ? ` ±${f.jitterMs}` : ''} (${f.direction === 'request' ? '요청 방향' : '응답 방향'})`
+    case 'error': return `B 오류 응답 ${f.percent}%`
+    case 'overload': return `B 과부하 (동시 ${f.slots}개, 건당 ${f.workMs?.toLocaleString()}ms)`
+    default: return faultKind[f.type].name
+  }
+}
+export const isActive = (f: Fault) => ['applying', 'active', 'removing', 'cleanup_failed'].includes(f.state)
 
 export const faultState: Record<Fault['state'], string> = {
   applying: '적용 중', active: '적용됨', removing: '제거 중', removed: '제거 확인됨', apply_failed: '적용 실패', cleanup_failed: '정리 미확인',

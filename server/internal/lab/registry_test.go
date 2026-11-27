@@ -69,3 +69,17 @@ func TestObservationAndRoute(t *testing.T) {
 		})
 	}
 }
+
+// 서비스 장애는 요청에 그 ID가 실려 있던 호출에만 표시한다. 시간이 겹쳐도 실리지 않았으면 표시하지 않는다.
+func TestServiceFaultMarksOnlyCarriers(t *testing.T) {
+	faults := []model.Fault{{ID: "aa", Node: injectableNode, AppliedUs: 5}}
+	call := func(ids string) *model.Span {
+		return &model.Span{Edge: injectableEdge, StartUs: 10, EndUs: 20, Route: "bypassed", Attrs: map[string]string{"lab.fault_ids": ids}}
+	}
+	if got := faultsFor(call("bb,aa"), faults); len(got) != 1 || got[0] != "aa" {
+		t.Fatalf("실려 있던 장애만 표시해야 함: %v", got)
+	}
+	if got := faultsFor(call(""), faults); len(got) != 0 {
+		t.Fatalf("실리지 않은 호출에는 표시하지 않아야 함: %v", got)
+	}
+}

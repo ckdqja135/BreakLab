@@ -1,7 +1,7 @@
 import { Activity, Boxes, CircleCheck, CircleHelp, CircleX, Eye, EyeOff, Server, type LucideIcon } from 'lucide-react'
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { LiveAnimator, replaySpan, replayTokens, type Token } from '../anim'
-import { ms, resultLabel, routeLabel, seconds } from '../format'
+import { faultKind, isActive, ms, resultLabel, routeLabel, seconds } from '../format'
 import type { Fault, LabState, Selection, ServiceStatus, Span, Trace } from '../types'
 
 const Y = 205
@@ -44,10 +44,19 @@ export function edgeStat(traces: Trace[], edge: string): EdgeStat {
   return st
 }
 
+const tagText = (f: Fault) =>
+  f.type === 'latency' ? `지연 ${f.latencyMs}ms ${f.direction === 'request' ? '요청 방향' : '응답 방향'}`
+    : f.type === 'error' ? `오류 응답 ${f.percent}%`
+    : f.type === 'overload' ? `과부하: ${f.slots}개씩, 건당 ${f.workMs}ms`
+    : faultKind[f.type].name
+const tagState = (f: Fault, live: boolean, nowUs: number) =>
+  f.state === 'active' && live ? `${f.node ? '적용됨' : '적용 확인됨'}, ${seconds(f.expiresUs - nowUs)} 뒤 자동 해제`
+    : f.state === 'applying' ? '적용 중' : f.state === 'removing' ? '제거 확인 중' : '정리 미확인, 재시도 중'
+
 const key = (fn: () => void) => (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn() } }
 
 export function Topology(p: Props) {
-  const active = p.faults.find((f) => ['applying', 'active', 'removing', 'cleanup_failed'].includes(f.state))
+  const active = p.faults.filter(isActive)
   const focusEdges = new Set(p.focus?.spans.filter((s) => s.edge).map((s) => s.edge))
   return (
     <svg className="topo" viewBox="0 0 1008 410" role="group" aria-label="서비스 토폴로지">
@@ -58,13 +67,13 @@ export function Topology(p: Props) {
       {p.state.topology.edges.map((e) => {
         const [x1, x2] = LINE[e.id]
         const st = edgeStat(p.traces, e.id)
-        const fault = active?.edge === e.id ? active : undefined
+        const fault = active.find((f) => f.edge === e.id)
         const sel = p.selection?.type === 'edge' && p.selection.id === e.id
         const dim = p.focus && !focusEdges.has(e.id)
         const observed = st.total > 0
         const mid = (x1 + x2) / 2
         const cls = (lane: 'request' | 'response') =>
-          `wire ${observed ? '' : 'unobserved'} ${fault && (fault.type === 'cut' || fault.direction === lane) ? 'faulted' : ''} ${p.focus && focusEdges.has(e.id) ? 'focused' : ''}`
+          `wire ${observed ? '' : 'unobserved'} ${fault && (fault.type === 'cut' || (fault.type === 'latency' ? fault.direction === lane : lane === 'request')) ? 'faulted' : ''} ${p.focus && focusEdges.has(e.id) ? 'focused' : ''}`
         const gap = fault?.type === 'cut' ? 26 : e.proxy ? 15 : 0
         const pick = () => p.onSelect({ type: 'edge', id: e.id })
         return (
@@ -82,7 +91,7 @@ export function Topology(p: Props) {
               </>
             )}
             {e.proxy && (
-              <g className={`valve ${fault ? 'on' : ''}`}>
+              <g className={`valve ${fault ? 'on' : ''}`} data-c="proxy">
                 <path d={`M${mid - 15} ${Y - 24} L${mid + 15} ${Y + 24} V${Y - 24} L${mid - 15} ${Y + 24} Z`} />
                 <text x={mid} y={Y + 42} className="t-small">프록시</text>
               </g>
@@ -104,11 +113,8 @@ export function Topology(p: Props) {
               <g className="faulttag">
                 <path d={`M${mid} ${Y - 26}V${Y - 46} M${mid} ${Y - 80}V${Y - 92}`} />
                 <rect x={mid - 104} y={Y - 136} width="208" height="44" rx="3" />
-                <text x={mid} y={Y - 118} className="t-fault">{fault.type === 'cut' ? '연결 차단' : `지연 ${fault.latencyMs}ms ${fault.direction === 'request' ? '요청 방향' : '응답 방향'}`}</text>
-                <text x={mid} y={Y - 101} className="t-fault2">
-                  {fault.state === 'active' && !p.past ? `적용 확인됨, ${seconds(fault.expiresUs - p.nowUs)} 뒤 자동 해제`
-                    : fault.state === 'applying' ? '적용 중' : fault.state === 'removing' ? '제거 확인 중' : '정리 미확인, 재시도 중'}
-                </text>
+                <text x={mid} y={Y - 118} className="t-fault">{tagText(fault)}</text>
+                <text x={mid} y={Y - 101} className="t-fault2">{tagState(fault, !p.past, p.nowUs)}</text>
               </g>
             )}
           </g>
@@ -122,8 +128,12 @@ export function Topology(p: Props) {
         const sel = p.selection?.type === 'node' && p.selection.id === n.id
         const on = p.focus?.spans.some((s) => s.service === n.id)
         const pick = () => p.onSelect({ type: 'node', id: n.id })
+        const fault = active.find((f) => f.node === n.id)
+        const cx = b.x + b.w / 2
+        // 과부하 중에는 받은 요청 가운데 자리를 얻지 못한 수가 줄을 선 수다.
+        const queued = fault?.type === 'overload' && !p.past ? Math.max(0, busy - (fault.slots ?? 0)) : 0
         return (
-          <g key={n.id} className={`node ${sel ? 'sel' : ''} ${p.focus ? (on ? 'focused' : 'dim') : ''}`} role="button" tabIndex={0} aria-label={n.name} onClick={pick} onKeyDown={key(pick)}>
+          <g key={n.id} className={`node ${sel ? 'sel' : ''} ${fault ? 'faulted' : ''} ${p.focus ? (on ? 'focused' : 'dim') : ''}`} data-c={n.id} role="button" tabIndex={0} aria-label={n.name} onClick={pick} onKeyDown={key(pick)}>
             <rect className="body" x={b.x} y={Y - H / 2} width={b.w} height={H} />
             <path className="ticks" d={`M${b.x - 6} ${Y - H / 2}h12 M${b.x} ${Y - H / 2 - 6}v12 M${b.x + b.w - 6} ${Y - H / 2}h12 M${b.x + b.w} ${Y - H / 2 - 6}v12 M${b.x - 6} ${Y + H / 2}h12 M${b.x} ${Y + H / 2 - 6}v12 M${b.x + b.w - 6} ${Y + H / 2}h12 M${b.x + b.w} ${Y + H / 2 - 6}v12`} />
             <Icon x={b.x + 14} y={Y - 38} size={22} className="nicon" />
@@ -134,7 +144,17 @@ export function Topology(p: Props) {
                 <text x={b.x + 14} y={Y + 30} className="t-stat">실제 HTTP 요청</text>
               </>
             )}
-            {busy > 0 && <g className="busy"><rect x={b.x + b.w - 70} y={Y - H / 2 - 12} width="62" height="22" rx="3" /><text x={b.x + b.w - 39} y={Y - H / 2 + 3}>처리 중 {busy}</text></g>}
+            {busy > 0 && (queued > 0
+              ? <g className="busy queued"><rect x={b.x + b.w - 112} y={Y - H / 2 - 12} width="104" height="22" rx="3" /><text x={b.x + b.w - 60} y={Y - H / 2 + 3}>처리 {busy - queued}, 줄 {queued}</text></g>
+              : <g className="busy"><rect x={b.x + b.w - 70} y={Y - H / 2 - 12} width="62" height="22" rx="3" /><text x={b.x + b.w - 39} y={Y - H / 2 + 3}>처리 중 {busy}</text></g>)}
+            {fault && (
+              <g className="faulttag">
+                <path d={`M${cx - 60} ${Y - H / 2}V${Y - H / 2 - 20}`} />
+                <rect x={cx - 104} y={Y - H / 2 - 64} width="208" height="44" rx="3" />
+                <text x={cx} y={Y - H / 2 - 46} className="t-fault">{tagText(fault)}</text>
+                <text x={cx} y={Y - H / 2 - 29} className="t-fault2">{tagState(fault, !p.past, p.nowUs)}</text>
+              </g>
+            )}
           </g>
         )
       })}

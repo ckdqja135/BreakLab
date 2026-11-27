@@ -19,9 +19,14 @@ export interface Trace {
   httpStatus?: number; error?: string; observation: Observation; notes: string[]; spans: Span[]
 }
 export interface Cleanup { verified: boolean; checkedUs: number; detail: string }
-export interface Fault {
-  id: string; runId: string; edge: string; type: 'latency' | 'cut'; direction?: 'request' | 'response'; latencyMs?: number; jitterMs?: number
-  ttlSec: number; state: 'applying' | 'active' | 'removing' | 'removed' | 'apply_failed' | 'cleanup_failed'
+export type FaultType = 'latency' | 'cut' | 'blackhole' | 'reset' | 'error' | 'overload'
+// 연결 장애는 edge에, 서비스 장애(error, overload)는 node에 건다.
+export interface FaultInput {
+  edge?: string; node?: string; type: FaultType; direction?: 'request' | 'response'; latencyMs?: number; jitterMs?: number
+  percent?: number; slots?: number; workMs?: number; ttlSec: number
+}
+export interface Fault extends FaultInput {
+  id: string; runId: string; state: 'applying' | 'active' | 'removing' | 'removed' | 'apply_failed' | 'cleanup_failed'
   requestedUs: number; appliedUs: number; expiresUs: number; removeRequestedUs: number; removedUs: number
   endReason?: string; error?: string; cleanup?: Cleanup; recoveryUs?: number
 }
@@ -48,3 +53,4 @@ export interface LabState {
 }
 export interface RunDetail { run: Run; faults: Fault[]; traces: Trace[]; events: LabEvent[] }
 export type Selection = { type: 'node' | 'edge'; id: string } | null
+export type Target = { edge: string } | { node: string }

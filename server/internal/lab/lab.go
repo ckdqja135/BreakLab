@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,6 +32,7 @@ import (
 const (
 	generatorID    = "generator"
 	injectableEdge = "a-b"
+	injectableNode = "service-b"
 )
 
 // edges는 실험을 허용한 연결 목록이다. API는 이 목록의 ID만 받는다.
@@ -272,7 +274,7 @@ func (l *Lab) EndRun(reason string) (model.Cleanup, int, error) {
 	}
 
 	l.opMu.Lock()
-	cl := l.clearFaults(reason)
+	cl := l.clearFaults(reason, true)
 	l.opMu.Unlock()
 
 	if active {
@@ -292,30 +294,40 @@ func (l *Lab) EndRun(reason string) (model.Cleanup, int, error) {
 	return cl, canceled, nil
 }
 
-// clearFaults는 opMu를 잡은 상태에서 호출한다.
-func (l *Lab) clearFaults(reason string) model.Cleanup {
+// clearFaults는 opMu를 잡은 상태에서 호출한다. 프록시를 비우고 연결 장애를 끝낸다.
+// all이면 서비스 장애도 함께 끝낸다.
+func (l *Lab) clearFaults(reason string, all bool) model.Cleanup {
 	req := model.NowUs()
 	st, cl := l.px.Clear()
 	var changed []model.Fault
 	l.mu.Lock()
 	l.proxy = st
 	for _, f := range l.faults {
-		if f.Final() {
+		if f.Final() || (f.Node != "" && !all) {
 			continue
 		}
 		if f.RemoveReqUs == 0 {
 			f.RemoveReqUs = req
 		}
-		l.settle(f, reason, cl)
+		if f.Node != "" {
+			l.settle(f, reason, serviceCleanup())
+		} else {
+			l.settle(f, reason, cl)
+		}
 		changed = append(changed, *f)
 	}
 	l.mu.Unlock()
 	l.hub.Publish("proxy", st)
 	for _, f := range changed {
 		l.publishFault(f)
-		l.event(f.RunID, "fault_"+f.State, faultText(f)+" 종료 ("+reasonText[reason]+"): "+cl.Detail)
+		l.event(f.RunID, "fault_"+f.State, faultText(f)+" 종료 ("+reasonText[reason]+"): "+f.Cleanup.Detail)
 	}
 	return cl
+}
+
+// 서비스 장애는 요청에 실어 보내므로 남는 상태가 없다. 싣기를 멈추면 끝난다.
+func serviceCleanup() model.Cleanup {
+	return model.Cleanup{Verified: true, CheckedUs: model.NowUs(), Detail: "새 요청에 더 이상 싣지 않음"}
 }
 
 // settle은 mu를 잡은 상태에서 호출한다.
@@ -362,19 +374,37 @@ var reasonText = map[string]string{
 }
 
 func faultText(f model.Fault) string {
-	if f.Type == "cut" {
-		return "연결 차단"
-	}
 	dir := "응답 방향"
 	if f.Direction == "request" {
 		dir = "요청 방향"
+	}
+	switch f.Type {
+	case "cut":
+		return "연결 차단"
+	case "reset":
+		return "연결 리셋"
+	case "blackhole":
+		return "응답 없음"
+	case "error":
+		return fmt.Sprintf("B 오류 응답 %d%%", f.Percent)
+	case "overload":
+		return fmt.Sprintf("B 과부하 (동시 %d개, 건당 %dms)", f.Slots, f.WorkMs)
 	}
 	return fmt.Sprintf("지연 %dms %s", f.LatencyMs, dir)
 }
 
 func (l *Lab) ApplyFault(in model.Fault) (*model.Fault, error) {
-	if in.Edge != injectableEdge {
-		return nil, Invalid{"장애를 넣을 수 없는 연결입니다"}
+	onNode := in.Type == "error" || in.Type == "overload"
+	if onNode {
+		if in.Node != injectableNode {
+			return nil, Invalid{"장애를 넣을 수 없는 서비스입니다"}
+		}
+		in.Edge, in.Direction, in.LatencyMs, in.JitterMs = "", "", 0, 0
+	} else {
+		if in.Edge != injectableEdge {
+			return nil, Invalid{"장애를 넣을 수 없는 연결입니다"}
+		}
+		in.Node, in.Percent, in.Slots, in.WorkMs = "", 0, 0, 0
 	}
 	switch in.Type {
 	case "latency":
@@ -387,8 +417,21 @@ func (l *Lab) ApplyFault(in model.Fault) (*model.Fault, error) {
 		if in.Direction != "request" && in.Direction != "response" {
 			return nil, Invalid{"지연 방향은 request 또는 response여야 합니다"}
 		}
-	case "cut":
+	case "cut", "blackhole", "reset":
 		in.LatencyMs, in.JitterMs, in.Direction = 0, 0, ""
+	case "error":
+		in.Slots, in.WorkMs = 0, 0
+		if in.Percent < 1 || in.Percent > 100 {
+			return nil, Invalid{"오류 비율은 1에서 100 사이여야 합니다"}
+		}
+	case "overload":
+		in.Percent = 0
+		if in.Slots < 1 || in.Slots > l.limits.MaxInFlight {
+			return nil, Invalid{fmt.Sprintf("동시 처리 수는 1에서 %d 사이여야 합니다", l.limits.MaxInFlight)}
+		}
+		if in.WorkMs < 1 || in.WorkMs > 3000 {
+			return nil, Invalid{"건당 처리 시간은 1ms에서 3000ms 사이여야 합니다"}
+		}
 	default:
 		return nil, Invalid{"지원하지 않는 장애 유형입니다"}
 	}
@@ -407,14 +450,25 @@ func (l *Lab) ApplyFault(in model.Fault) (*model.Fault, error) {
 		return nil, Conflict{"이전 장애의 정리가 확인되지 않았습니다"}
 	}
 	for _, f := range l.faults {
-		if f.Edge == in.Edge && !f.Final() {
+		if f.Edge == in.Edge && f.Node == in.Node && !f.Final() {
 			l.mu.Unlock()
-			return nil, Conflict{"이 연결에는 이미 장애가 적용되어 있습니다. 먼저 제거하세요"}
+			return nil, Conflict{"이 대상에는 이미 장애가 적용되어 있습니다. 먼저 제거하세요"}
 		}
 	}
-	f := &model.Fault{ID: newID(), RunID: l.run.ID, Edge: in.Edge, Type: in.Type, Direction: in.Direction,
-		LatencyMs: in.LatencyMs, JitterMs: in.JitterMs, TTLSec: in.TTLSec, State: "applying", RequestedUs: model.NowUs()}
+	f := &model.Fault{ID: newID(), RunID: l.run.ID, Edge: in.Edge, Node: in.Node, Type: in.Type, Direction: in.Direction,
+		LatencyMs: in.LatencyMs, JitterMs: in.JitterMs, Percent: in.Percent, Slots: in.Slots, WorkMs: in.WorkMs,
+		TTLSec: in.TTLSec, State: "applying", RequestedUs: model.NowUs()}
 	l.faults = append(l.faults, f)
+	if onNode {
+		// 프록시를 건드리지 않는다. 지금부터 보내는 요청에 실려 B가 그대로 동작한다.
+		f.State, f.AppliedUs = "active", f.RequestedUs
+		f.ExpiresUs = f.AppliedUs + int64(f.TTLSec)*1e6
+		snap := *f
+		l.mu.Unlock()
+		l.publishFault(snap)
+		l.event(snap.RunID, "fault_active", faultText(snap)+" 적용: 지금부터 보내는 요청에 실림")
+		return &snap, nil
+	}
 	snap := *f
 	l.mu.Unlock()
 	l.publishFault(snap)
@@ -470,11 +524,20 @@ func (l *Lab) RemoveFault(id, reason string) (*model.Fault, error) {
 		l.mu.Unlock()
 		return nil, Conflict{"제거할 장애가 없습니다"}
 	}
+	if f.Node != "" {
+		f.RemoveReqUs = model.NowUs()
+		l.settle(f, reason, serviceCleanup())
+		snap := *f
+		l.mu.Unlock()
+		l.publishFault(snap)
+		l.event(snap.RunID, "fault_removed", faultText(snap)+" 종료 ("+reasonText[reason]+"): "+snap.Cleanup.Detail)
+		return &snap, nil
+	}
 	f.State, f.RemoveReqUs = "removing", model.NowUs()
 	snap := *f
 	l.mu.Unlock()
 	l.publishFault(snap)
-	l.clearFaults(reason)
+	l.clearFaults(reason, false)
 	l.mu.Lock()
 	snap = *f
 	l.mu.Unlock()
@@ -503,6 +566,22 @@ func (l *Lab) Send(kind string) (int, string, error) {
 	l.inflight++
 	l.wg.Add(1)
 	seq, run, rctx, wg := l.seq, *l.run, l.runCtx, l.wg
+	// 적용 중인 서비스 장애는 요청을 만드는 순간의 값으로 싣는다. 보낸 뒤에는 바뀌지 않는다.
+	pol := run.Settings.Policy()
+	var carried []string
+	for _, f := range l.faults {
+		if f.Node == "" || f.State != "active" {
+			continue
+		}
+		carried = append(carried, f.ID)
+		switch f.Type {
+		case "error":
+			pol.FailPercent = f.Percent
+		case "overload":
+			pol.Slots, pol.Work = f.Slots, time.Duration(f.WorkMs)*time.Millisecond
+		}
+	}
+	pol.Faults = strings.Join(carried, ",")
 	l.mu.Unlock()
 
 	ctx, span := l.tracer.Start(rctx, "GET /order", trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
@@ -518,17 +597,17 @@ func (l *Lab) Send(kind string) (int, string, error) {
 			l.mu.Unlock()
 			wg.Done()
 		}()
-		l.do(ctx, rctx, span, run.Settings)
+		l.do(ctx, rctx, span, run.Settings, pol)
 	}()
 	return seq, root.TraceID, nil
 }
 
-func (l *Lab) do(ctx, rctx context.Context, span trace.Span, s model.Settings) {
+func (l *Lab) do(ctx, rctx context.Context, span trace.Span, s model.Settings, pol wire.Policy) {
 	timeout := time.Duration(s.ClientTimeoutMs) * time.Millisecond
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", l.cfg.AURL+"/order", nil)
-	s.Policy().Apply(req.Header)
+	pol.Apply(req.Header)
 	tele.Propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	result, errText, status := wire.ResultOK, "", 0
@@ -817,6 +896,9 @@ func (l *Lab) reconcile() {
 	l.mu.Lock()
 	var active, failed *model.Fault
 	for _, f := range l.faults {
+		if f.Node != "" {
+			continue // 서비스 장애는 프록시 상태와 무관하다.
+		}
 		switch f.State {
 		case "active":
 			active = f
@@ -838,7 +920,7 @@ func (l *Lab) reconcile() {
 	case active != nil && err == nil && proxyctl.Matches(st, *active):
 	case active != nil:
 		l.event(active.RunID, "fault_lost", "프록시 상태가 설정과 달라져 장애를 종료함")
-		l.clearFaults("lost")
+		l.clearFaults("lost", false)
 		return
 	case err != nil || !proxyctl.Clean(st):
 		l.event(runID, "unexpected_state", "기록에 없는 프록시 상태를 발견해 정리함")
@@ -887,7 +969,7 @@ func (l *Lab) checkServices() {
 func (l *Lab) Shutdown() {
 	if _, _, err := l.EndRun("shutdown"); err != nil {
 		l.opMu.Lock()
-		l.clearFaults("shutdown")
+		l.clearFaults("shutdown", true)
 		l.opMu.Unlock()
 	}
 }

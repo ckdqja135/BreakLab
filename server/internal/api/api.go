@@ -104,15 +104,19 @@ func Public(l *lab.Lab, webDir string, hosts []string) http.Handler {
 	mux.HandleFunc("POST /api/faults", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Edge      string `json:"edge"`
+			Node      string `json:"node"`
 			Type      string `json:"type"`
 			Direction string `json:"direction"`
 			LatencyMs int    `json:"latencyMs"`
 			JitterMs  int    `json:"jitterMs"`
+			Percent   int    `json:"percent"`
+			Slots     int    `json:"slots"`
+			WorkMs    int    `json:"workMs"`
 			TTLSec    int    `json:"ttlSec"`
 		}
 		if body(w, r, &in) {
-			f, err := l.ApplyFault(model.Fault{Edge: in.Edge, Type: in.Type, Direction: in.Direction,
-				LatencyMs: in.LatencyMs, JitterMs: in.JitterMs, TTLSec: in.TTLSec})
+			f, err := l.ApplyFault(model.Fault{Edge: in.Edge, Node: in.Node, Type: in.Type, Direction: in.Direction,
+				LatencyMs: in.LatencyMs, JitterMs: in.JitterMs, Percent: in.Percent, Slots: in.Slots, WorkMs: in.WorkMs, TTLSec: in.TTLSec})
 			reply(w, f, err)
 		}
 	})

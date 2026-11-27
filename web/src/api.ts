@@ -1,4 +1,4 @@
-import type { Cleanup, Fault, Run, RunDetail, Settings } from './types'
+import type { Cleanup, Fault, FaultInput, Run, RunDetail, Settings } from './types'
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
@@ -20,8 +20,7 @@ export const api = {
   send: () => call<{ seq: number; traceId: string }>('POST', '/api/requests'),
   startRepeat: (count: number, intervalMs: number, concurrency: number) => call('POST', '/api/repeat', { count, intervalMs, concurrency }),
   stopRepeat: () => call('POST', '/api/repeat/stop'),
-  applyFault: (f: { edge: string; type: string; direction: string; latencyMs: number; jitterMs: number; ttlSec: number }) =>
-    call<Fault>('POST', '/api/faults', f),
+  applyFault: (f: FaultInput) => call<Fault>('POST', '/api/faults', f),
   removeFault: (id: string) => call<Fault>('POST', `/api/faults/${id}/remove`),
   runs: () => call<Run[]>('GET', '/api/runs'),
   run: (id: string) => call<RunDetail>('GET', `/api/runs/${id}`),

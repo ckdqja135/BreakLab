@@ -162,6 +162,10 @@ func (s *server) callB(parent context.Context, p wire.Policy, attempt int) (out 
 	})
 	req, _ := http.NewRequestWithContext(ctx, "GET", s.bURL.JoinPath("/stock").String(), nil)
 	req.Header.Set(wire.HeaderWork, strconv.FormatInt(p.Work.Milliseconds(), 10))
+	p.ApplyService(req.Header)
+	if p.Faults != "" {
+		span.SetAttributes(attribute.String("lab.fault_ids", p.Faults))
+	}
 	tele.Propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	resp, err := s.client.Do(req)

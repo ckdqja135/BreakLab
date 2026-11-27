@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -271,12 +272,24 @@ func (r *registry) route(s, peer *model.Span) string {
 	return "proxied"
 }
 
+// faultsFor는 이 호출이 겪은 장애를 고른다. 연결 장애는 프록시를 실제로 지난 호출만,
+// 서비스 장애는 요청에 그 장애 ID가 실려 있던 호출만 해당한다.
 func faultsFor(s *model.Span, faults []model.Fault) []string {
 	var ids []string
-	if s.Edge != injectableEdge || s.Route == "bypassed" || s.Route == "undetermined" {
+	if s.Edge != injectableEdge {
 		return nil
 	}
+	carried := strings.Split(s.Attrs["lab.fault_ids"], ",")
 	for _, f := range faults {
+		if f.Node != "" {
+			if slices.Contains(carried, f.ID) {
+				ids = append(ids, f.ID)
+			}
+			continue
+		}
+		if s.Route == "bypassed" || s.Route == "undetermined" {
+			continue
+		}
 		if f.Edge != s.Edge || f.AppliedUs == 0 || (s.EndUs > 0 && f.AppliedUs > s.EndUs) || (f.RemovedUs > 0 && f.RemovedUs < s.StartUs) {
 			continue
 		}
