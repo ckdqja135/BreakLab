@@ -109,7 +109,7 @@ export const LESSONS: Lesson[] = [
     id: 'path', topic: 'stock', title: '요청 하나 따라가기', goal: '요청이 어디를 거쳐 갔다 오는지 봅니다.',
     steps: [
       begin,
-      send((t) => t.result === 'ok', '진짜 HTTP 요청 하나가 요청 발생기에서 A로, A에서 B로 갑니다. 그림 위의 점을 따라가 보세요.',
+      send((t) => t.result === 'ok', '진짜 HTTP 요청 하나가 클라이언트에서 A로, A에서 B로 갑니다. 그림 위의 점을 따라가 보세요.',
         (t) => `${t.seq}번 요청은 ${took(t)} 걸렸습니다. A는 B의 답을 받은 뒤에야 답을 돌려줬습니다.`),
       read("아래 '손님 화면'에서 방금 손님과 오른쪽 풀이를 읽어 보세요.", '요청 하나를 주문하는 손님 한 명으로 보여 줍니다. 숫자는 모두 실제로 잰 값입니다.', 'tab-impact'),
       {

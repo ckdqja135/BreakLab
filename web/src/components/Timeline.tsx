@@ -13,7 +13,7 @@ function rows(t: Trace, horizon: number): Row[] {
   const out: Row[] = []
   const add = (s: Span, depth: number) => {
     const to = meta(EDGE_TO[s.edge ?? '']).short
-    const label = s.service === 'generator' ? '요청 발생기' : s.kind === 'client' ? `${meta(s.service).short}의 ${to} 호출 ${callName(s)}` : `${nodeName[s.service] ?? s.service} 처리`
+    const label = s.service === 'generator' ? '클라이언트' : s.kind === 'client' ? `${meta(s.service).short}의 ${to} 호출 ${callName(s)}` : `${nodeName[s.service] ?? s.service} 처리`
     out.push({ key: s.spanId, depth, label, span: s, startUs: s.startUs, endUs: s.endUs || horizon })
     const kids = t.spans.filter((c) => c.parentId === s.spanId)
     kids.forEach((c) => add(c, depth + 1))

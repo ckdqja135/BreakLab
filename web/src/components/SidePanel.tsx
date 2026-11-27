@@ -47,7 +47,7 @@ function Conditions({ live, settings, setSettings, label, setLabel, limitSec, se
       <p className="note">{scenario.about}</p>
       <label className="num wide"><span>실험 이름</span>
         <input value={running ? live.run!.label : label} maxLength={60} disabled={running} placeholder="예: 재시도 2회" onChange={(e) => setLabel(e.target.value)} /></label>
-      <h3>요청자</h3>
+      <h3>클라이언트</h3>
       <div className="grid2">
         <Num label="전체 타임아웃 ms" value={s.clientTimeoutMs} min={100} max={20000} step={100} disabled={running} onChange={set('clientTimeoutMs')} hint="A 응답을 기다리는 한도" />
         <Num label="실험 시간 제한 초" value={running ? live.run!.limitSec : limitSec} min={10} max={live.limits.maxRunSec} step={10} disabled={running} onChange={setLimitSec} hint="지나면 자동 종료" />

@@ -57,7 +57,7 @@ func inRange(name string, v, min, max int) error {
 
 func (s Settings) Validate() error {
 	for _, e := range []error{
-		inRange("요청자 전체 타임아웃(ms)", s.ClientTimeoutMs, 100, 20000),
+		inRange("클라이언트 전체 타임아웃(ms)", s.ClientTimeoutMs, 100, 20000),
 		inRange("A의 호출 타임아웃(ms)", s.CallTimeoutMs, 50, 10000),
 		inRange("최대 시도 횟수", s.MaxAttempts, 1, 4),
 		inRange("재시도 대기(ms)", s.BackoffMs, 0, 2000),
@@ -305,7 +305,7 @@ func Summarize(traces []Trace) Summary {
 		if t.Observation == ObsPartial || t.Observation == ObsUnknown {
 			s.ObsIncomplete++
 		}
-		// 요청 발생기를 뺀 모든 서비스 간 호출을 센다.
+		// 클라이언트를 뺀 모든 서비스 간 호출을 센다.
 		for _, sp := range t.Spans {
 			if sp.Kind == "server" && sp.Attrs["lab.degraded"] != "" {
 				s.Degraded++

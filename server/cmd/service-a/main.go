@@ -206,7 +206,7 @@ func (x *work) soften(d svc.Dep) bool {
 // fail은 다른 서비스 호출이 끝내 실패했을 때 손님에게 오류를 돌려준다.
 func (x *work) fail(d svc.Dep, out svc.Outcome) {
 	if x.q.Ctx.Err() != nil {
-		x.q.Span.SetAttributes(attribute.String("lab.result", wire.ResultCanceled), attribute.String("lab.error", "요청자가 연결을 끊어 처리를 중단함"))
+		x.q.Span.SetAttributes(attribute.String("lab.result", wire.ResultCanceled), attribute.String("lab.error", "클라이언트가 연결을 끊어 처리를 중단함"))
 		return
 	}
 	status := http.StatusBadGateway

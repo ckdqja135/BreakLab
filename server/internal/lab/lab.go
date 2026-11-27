@@ -32,7 +32,7 @@ import (
 )
 
 type Config struct {
-	AURL     string    // 요청 발생기가 부르는 A의 주소
+	AURL     string    // 클라이언트가 부르는 A의 주소
 	Services []Service // A가 부르는 서비스들의 관리 경로
 }
 
@@ -116,7 +116,7 @@ func New(cfg Config, st *store.Store, px *proxyctl.Ctl) *Lab {
 
 func (l *Lab) Hub() *hub.Hub { return l.hub }
 
-// rootProcessor는 요청 발생기의 완료 span을 같은 프로세스 안에서 전달한다.
+// rootProcessor는 클라이언트의 완료 span을 같은 프로세스 안에서 전달한다.
 type rootProcessor struct{ reg *registry }
 
 func (rootProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
@@ -694,7 +694,7 @@ func (l *Lab) do(ctx, rctx context.Context, span trace.Span, s model.Settings, p
 	case rctx.Err() != nil:
 		result, errText = wire.ResultCanceled, "실험 중지로 요청을 취소함"
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		result, errText = wire.ResultTimeout, "요청자 전체 타임아웃 "+timeout.String()+" 초과"
+		result, errText = wire.ResultTimeout, "클라이언트 전체 타임아웃 "+timeout.String()+" 초과"
 	case errors.Is(err, syscall.ECONNREFUSED):
 		result, errText = wire.ResultRefused, "A 연결 거부: "+err.Error()
 	default:

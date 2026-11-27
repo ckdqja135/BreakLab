@@ -85,7 +85,7 @@ function Compare({ a, b, topic }: { a: RunDetail; b: RunDetail; topic: (r: Run) 
     ['조건', [
       ['주제', t((d) => topic(d.run))],
       ['시도별 타임아웃', n((d) => d.run.settings.callTimeoutMs, (v) => `${v}ms`)], ['최대 시도', n((d) => d.run.settings.maxAttempts)],
-      ['재시도 대기', n((d) => d.run.settings.backoffMs, (v) => `${v}ms`)], ['요청자 타임아웃', n((d) => d.run.settings.clientTimeoutMs, (v) => `${v}ms`)],
+      ['재시도 대기', n((d) => d.run.settings.backoffMs, (v) => `${v}ms`)], ['클라이언트 타임아웃', n((d) => d.run.settings.clientTimeoutMs, (v) => `${v}ms`)],
       ['B 처리 시간', n((d) => d.run.settings.workMs, (v) => `${v}ms`)], ['인증 결과 기억', n((d) => d.run.settings.authCacheSec ?? 0, (v) => `${v}초`)],
       ['결제 멱등 키', t((d) => (d.run.settings.idempotent ? '붙임' : '안 붙임'))],
       ['서킷 브레이커', t((d) => (d.run.settings.breakerSec ? `${d.run.settings.breakerSec}초` : '끔'))], ['동시 호출 제한', t((d) => (d.run.settings.maxConcurrent ? `${d.run.settings.maxConcurrent}개` : '끔'))],

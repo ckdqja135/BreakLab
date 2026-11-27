@@ -115,7 +115,7 @@ export function story(t: Trace, nowUs: number): Story {
       : { tone: 'warn', text: `손님은 ${sum} 만에 '주문 접수, 확인 중' 화면을 봤습니다. 실패는 아니지만 건너뛴 일(${soft.map((id) => meta(id).short).join(', ')})은 나중에 다시 처리해야 합니다.` }
       break
     case 'http_error': verdict = { tone: 'bad', text: `손님은 ${sum}를 기다린 끝에 오류 화면(HTTP ${t.httpStatus})을 봤습니다.` }; break
-    case 'timeout': verdict = { tone: 'bad', text: `손님은 ${sum}를 기다리다 포기했습니다. 요청자 타임아웃입니다.` }; break
+    case 'timeout': verdict = { tone: 'bad', text: `손님은 ${sum}를 기다리다 포기했습니다. 클라이언트가 기다리는 한도를 넘겼습니다.` }; break
     case 'canceled': verdict = { tone: 'plain', text: '실험 중지로 이 요청은 취소되었습니다.' }; break
     default: verdict = { tone: 'bad', text: `손님은 화면을 보지 못했습니다. ${t.error ?? ''}` }
   }

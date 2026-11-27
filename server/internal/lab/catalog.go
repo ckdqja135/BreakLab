@@ -25,7 +25,7 @@ type nodeDef struct {
 
 // nodes는 실험을 허용한 서비스 목록이다.
 var nodes = []nodeDef{
-	{Node: model.Node{ID: generatorID, Name: "요청 발생기", Role: "관리 서버 안에서 실제 HTTP 요청을 보냄"}},
+	{Node: model.Node{ID: generatorID, Name: "클라이언트", Role: "손님 대신 실제 HTTP 요청을 보냄. 관리 서버 안에서 실행됨"}},
 	{Node: model.Node{ID: hubID, Name: "Service A", Role: "손님의 요청을 받아 다른 서비스를 차례로 부름"}, stateful: true, gauges: true},
 	{Node: model.Node{ID: "service-b", Name: "Service B", Role: "재고 조회", Faults: true}},
 	{Node: model.Node{ID: "auth", Name: "인증", Role: "모든 주문이 먼저 거치는 손님 확인", Faults: true}},
@@ -50,7 +50,7 @@ var edges = []model.Edge{
 
 type scenarioDef struct {
 	model.Scenario
-	path func(seq int) string // 요청 발생기가 A에 보내는 경로
+	path func(seq int) string // 클라이언트가 A에 보내는 경로
 	flow string               // A가 차례로 부를 단계
 }
 

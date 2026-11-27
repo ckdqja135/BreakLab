@@ -1,5 +1,5 @@
 // 서비스마다 화면에서 쓰는 이름과 아이콘, 문장에 쓰는 말.
-import { Activity, BellRing, Boxes, CreditCard, Database, KeyRound, ListOrdered, Server, Zap, type LucideIcon } from 'lucide-react'
+import { BellRing, Boxes, CreditCard, Database, KeyRound, ListOrdered, Server, UserRound, Zap, type LucideIcon } from 'lucide-react'
 
 export interface NodeMeta {
   name: string
@@ -12,7 +12,8 @@ export interface NodeMeta {
 }
 
 export const NODE: Record<string, NodeMeta> = {
-  generator: { name: '요청 발생기', short: '요청 발생기', subj: '요청 발생기가', topic: '요청 발생기는', obj: '요청 발생기를', ask: '', icon: Activity },
+  // 손님 자리에서 요청을 보내는 쪽. 실제로는 관리 서버 안에서 돈다.
+  generator: { name: '클라이언트', short: '클라이언트', subj: '클라이언트가', topic: '클라이언트는', obj: '클라이언트를', ask: '', icon: UserRound },
   'service-a': { name: 'Service A', short: 'A', subj: 'A가', topic: 'A는', obj: 'A를', ask: '', icon: Server },
   'service-b': { name: 'Service B', short: 'B', subj: 'B가', topic: 'B는', obj: 'B를', ask: 'B에 재고를 묻고', icon: Boxes },
   auth: { name: '인증', short: '인증', subj: '인증이', topic: '인증은', obj: '인증을', ask: '인증에 손님 확인을 맡기고', icon: KeyRound },
