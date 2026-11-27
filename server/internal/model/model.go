@@ -21,6 +21,11 @@ type Settings struct {
 	WorkMs          int  `json:"workMs"`
 	AuthCacheSec    int  `json:"authCacheSec"` // A가 인증 결과를 기억하는 시간. 0이면 매번 확인
 	Idempotent      bool `json:"idempotent"`   // A가 결제 요청에 멱등 키를 붙임
+	// 아래는 A가 스스로를 지키는 장치다.
+	BreakerSec    int  `json:"breakerSec"`    // 한 서비스가 연달아 3번 실패하면 이 시간 동안 부르지 않음. 0이면 끔
+	MaxConcurrent int  `json:"maxConcurrent"` // 한 서비스에 동시에 보내는 호출 수. 넘치면 바로 거절. 0이면 제한 없음
+	Fallback      bool `json:"fallback"`      // 실패한 단계가 있어도 임시로 접수함
+	BackoffGrow   bool `json:"backoffGrow"`   // 재시도 대기를 매번 두 배로 늘리고 흔듦
 }
 
 var DefaultSettings = Settings{ClientTimeoutMs: 5000, CallTimeoutMs: 1000, MaxAttempts: 2, BackoffMs: 200, WorkMs: 15}
@@ -58,6 +63,8 @@ func (s Settings) Validate() error {
 		inRange("재시도 대기(ms)", s.BackoffMs, 0, 2000),
 		inRange("B 처리 시간(ms)", s.WorkMs, 0, 3000),
 		inRange("인증 결과 기억(초)", s.AuthCacheSec, 0, 120),
+		inRange("서킷 브레이커 쉬는 시간(초)", s.BreakerSec, 0, 30),
+		inRange("동시 호출 제한", s.MaxConcurrent, 0, 5),
 	} {
 		if e != nil {
 			return e
@@ -72,6 +79,7 @@ func (s Settings) Policy() wire.Policy {
 		CallTimeout: time.Duration(s.CallTimeoutMs) * ms, MaxAttempts: s.MaxAttempts,
 		Backoff: time.Duration(s.BackoffMs) * ms, Work: time.Duration(s.WorkMs) * ms,
 		AuthCacheSec: s.AuthCacheSec, Idempotent: s.Idempotent,
+		BreakerSec: s.BreakerSec, MaxConcurrent: s.MaxConcurrent, Fallback: s.Fallback, BackoffGrow: s.BackoffGrow,
 	}
 }
 
@@ -173,6 +181,8 @@ type Summary struct {
 	Retries       int   `json:"retries"`
 	CallTimeouts  int   `json:"callTimeouts"`
 	ObsIncomplete int   `json:"obsIncomplete"`
+	Degraded      int   `json:"degraded"` // 일부 단계 없이 임시로 접수한 요청
+	Skipped       int   `json:"skipped"`  // A가 스스로 부르지 않은 호출(서킷 열림, 동시 호출 제한)
 }
 
 type Run struct {
@@ -296,6 +306,14 @@ func Summarize(traces []Trace) Summary {
 		}
 		// 요청 발생기를 뺀 모든 서비스 간 호출을 센다.
 		for _, sp := range t.Spans {
+			if sp.Kind == "server" && sp.Attrs["lab.degraded"] != "" {
+				s.Degraded++
+			}
+			for _, e := range sp.Events {
+				if e.Name == "호출 생략" {
+					s.Skipped++
+				}
+			}
 			if sp.Kind != "client" || sp.Edge == "" || sp.ParentID == "" {
 				continue
 			}

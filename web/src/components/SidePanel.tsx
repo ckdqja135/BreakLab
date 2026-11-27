@@ -59,6 +59,15 @@ function Conditions({ live, settings, setSettings, label, setLabel, limitSec, se
         <Num label="재시도 대기 ms" value={s.backoffMs} min={0} max={2000} step={50} disabled={running} onChange={set('backoffMs')} />
         {has('auth') && <Num label="인증 결과 기억 초" value={s.authCacheSec} min={0} max={120} step={10} disabled={running} onChange={set('authCacheSec')} hint="0이면 매번 인증을 부름" />}
       </div>
+      <h3>Service A의 방어 장치</h3>
+      <div className="grid2">
+        <Num label="서킷 브레이커 초" value={s.breakerSec} min={0} max={30} disabled={running} onChange={set('breakerSec')} hint="연달아 3번 실패하면 이 시간 동안 부르지 않음. 0이면 끔" />
+        <Num label="동시 호출 제한" value={s.maxConcurrent} min={0} max={5} disabled={running} onChange={set('maxConcurrent')} hint="한 서비스에 동시에 보내는 수. 넘치면 바로 거절. 0이면 끔" />
+      </div>
+      <label className="check"><input type="checkbox" checked={s.fallback} disabled={running} onChange={(e) => setSettings({ ...settings, fallback: e.target.checked })} />
+        <span>대체 응답<small>실패한 단계가 있어도 그 단계만 건너뛰고 임시로 접수합니다. 인증은 건너뛰지 않습니다.</small></span></label>
+      <label className="check"><input type="checkbox" checked={s.backoffGrow} disabled={running} onChange={(e) => setSettings({ ...settings, backoffGrow: e.target.checked })} />
+        <span>재시도 대기 늘리기<small>재시도할 때마다 대기를 두 배로 늘리고 무작위로 흔듭니다.</small></span></label>
       {has('pay') && (
         <label className="check"><input type="checkbox" checked={s.idempotent} disabled={running} onChange={(e) => setSettings({ ...settings, idempotent: e.target.checked })} />
           <span>결제에 멱등 키 붙이기<small>같은 주문의 결제 요청이 다시 와도 결제사가 한 번만 처리합니다.</small></span></label>

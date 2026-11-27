@@ -18,6 +18,11 @@ const (
 	HeaderAuthCache   = "X-Lab-Auth-Cache" // A가 인증 결과를 기억하는 초
 	HeaderIdempotent  = "X-Lab-Idempotent" // A가 결제에 멱등 키를 붙일지
 	HeaderFaults      = "X-Lab-Faults"     // 서비스 안에서 일으킬 장애. 서비스 ID별 JSON
+	// 아래는 A가 스스로를 지키는 장치다.
+	HeaderBreaker     = "X-Lab-Breaker-S"    // 연달아 실패하면 이 초만큼 호출을 쉰다. 0이면 끔
+	HeaderLimit       = "X-Lab-Limit"        // 한 서비스에 동시에 보내는 호출 수. 0이면 제한 없음
+	HeaderFallback    = "X-Lab-Fallback"     // 실패한 단계가 있어도 임시로 접수한다
+	HeaderBackoffGrow = "X-Lab-Backoff-Grow" // 재시도 대기를 매번 두 배로 늘리고 흔든다
 	HeaderIdemKey     = "Idempotency-Key"
 )
 
@@ -31,6 +36,8 @@ const (
 	ResultRefused   = "refused"
 	ResultReset     = "reset"
 	ResultError     = "error"
+	// ResultShed는 A가 스스로 부르지 않기로 한 경우다. 호출이 없으므로 span에는 쓰지 않는다.
+	ResultShed = "shed"
 )
 
 // ServiceFault는 한 서비스가 요청을 처리할 때 실제로 따르는 장애 지시다.
@@ -52,6 +59,11 @@ type Policy struct {
 	AuthCacheSec int
 	Idempotent   bool
 	Faults       map[string]ServiceFault
+
+	BreakerSec    int
+	MaxConcurrent int
+	Fallback      bool
+	BackoffGrow   bool
 }
 
 func clamp(n, min, max int) int {
@@ -97,6 +109,11 @@ func ParsePolicy(h http.Header) Policy {
 		Run:          token(h.Get(HeaderRun), 32),
 		AuthCacheSec: clampHeader(h, HeaderAuthCache, 0, 0, 120),
 		Idempotent:   h.Get(HeaderIdempotent) == "1",
+
+		BreakerSec:    clampHeader(h, HeaderBreaker, 0, 0, 30),
+		MaxConcurrent: clampHeader(h, HeaderLimit, 0, 0, 5),
+		Fallback:      h.Get(HeaderFallback) == "1",
+		BackoffGrow:   h.Get(HeaderBackoffGrow) == "1",
 	}
 	if v := h.Get(HeaderFaults); v != "" && len(v) <= 1024 {
 		var m map[string]ServiceFault
@@ -119,8 +136,12 @@ func (p Policy) Apply(h http.Header) {
 	h.Set(HeaderFlow, p.Flow)
 	h.Set(HeaderRun, p.Run)
 	h.Set(HeaderAuthCache, strconv.Itoa(p.AuthCacheSec))
-	if p.Idempotent {
-		h.Set(HeaderIdempotent, "1")
+	h.Set(HeaderBreaker, strconv.Itoa(p.BreakerSec))
+	h.Set(HeaderLimit, strconv.Itoa(p.MaxConcurrent))
+	for k, on := range map[string]bool{HeaderIdempotent: p.Idempotent, HeaderFallback: p.Fallback, HeaderBackoffGrow: p.BackoffGrow} {
+		if on {
+			h.Set(k, "1")
+		}
 	}
 	if len(p.Faults) > 0 {
 		b, _ := json.Marshal(p.Faults)

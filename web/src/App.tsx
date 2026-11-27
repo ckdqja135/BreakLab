@@ -47,10 +47,11 @@ export function App() {
     try { await fn() } catch (e) { onError((e as Error).message) } finally { setBusy(false) }
   }
 
-  const coach = useCoach(lab.live && { live: lab.live, traces: lab.live.traces, selection, focusId, tab }, nowUs, (l: Lesson) => {
+  // 과정을 시작할 때, 그리고 과정 중에 조건을 바꿔 다시 시작하는 단계(again)에서 주제와 조건을 맞춘다.
+  const coach = useCoach(lab.live && { live: lab.live, traces: lab.live.traces, selection, focusId, tab }, nowUs, (l: Lesson, again) => {
     setPast(null); setFocusId(null); setReplaying(false); setPlayUs(null); setSelection(null); setTab('impact'); setTopic(l.topic)
-    if (lab.live) setSettings({ ...lab.live.defaults, ...l.settings })
-    setLabel(`학습 ${LESSONS.indexOf(l) + 1}. ${l.title}`)
+    if (lab.live) setSettings({ ...lab.live.defaults, ...l.settings, ...again?.settings })
+    setLabel(`학습 ${LESSONS.indexOf(l) + 1}. ${l.title}${again ? ' (방어 켬)' : ''}`)
   })
 
   const { live, shown } = lab
@@ -107,7 +108,7 @@ export function App() {
         <div className="tabs" role="tablist">
           <button role="tab" data-c="tab-impact" aria-selected={tab === 'impact'} onClick={() => setTab('impact')}><UsersRound size={15} aria-hidden />손님 화면</button>
           <button role="tab" data-c="tab-calls" aria-selected={tab === 'calls'} onClick={() => setTab('calls')}><ListTree size={15} aria-hidden />요청 흐름</button>
-          <button role="tab" aria-selected={tab === 'history'} onClick={() => setTab('history')}><HistoryIcon size={15} aria-hidden />실행 이력과 비교</button>
+          <button role="tab" data-c="tab-history" aria-selected={tab === 'history'} onClick={() => setTab('history')}><HistoryIcon size={15} aria-hidden />실행 이력과 비교</button>
           <span className="grow" />
           {tab !== 'history' && <Totals s={past ? past.run.summary : shown.run?.summary} />}
           {!coach.open && <button className="learn" onClick={() => coach.setOpen(true)}><GraduationCap size={15} aria-hidden />학습 과정 {coach.done.length}/{LESSONS.length}</button>}

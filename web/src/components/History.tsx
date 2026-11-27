@@ -35,7 +35,7 @@ export function History({ refresh, topics, onOpen, onLoad, onError }: Props) {
                 <td>{topic(r)}</td>
                 <td>{r.label || <span className="sub">이름 없음</span>}</td>
                 <td>{r.status === 'ended' ? seconds(r.endedUs - r.startedUs) : '실행 중'}</td>
-                <td className="sub">타임아웃 {r.settings.callTimeoutMs}ms, 시도 {r.settings.maxAttempts}{r.settings.authCacheSec ? `, 인증 기억 ${r.settings.authCacheSec}초` : ''}{r.settings.idempotent ? ', 멱등 키' : ''}</td>
+                <td className="sub">타임아웃 {r.settings.callTimeoutMs}ms, 시도 {r.settings.maxAttempts}{r.settings.authCacheSec ? `, 인증 기억 ${r.settings.authCacheSec}초` : ''}{r.settings.idempotent ? ', 멱등 키' : ''}{r.settings.breakerSec ? `, 서킷 ${r.settings.breakerSec}초` : ''}{r.settings.maxConcurrent ? `, 동시 ${r.settings.maxConcurrent}` : ''}{r.settings.fallback ? ', 대체 응답' : ''}</td>
                 <td className="r mono">{r.summary.total}</td><td className="r mono">{r.summary.failed}</td>
                 <td className="r mono">{r.summary.p50Us ? ms(r.summary.p50Us) : '-'}</td><td className="r mono">{r.summary.p95Us ? ms(r.summary.p95Us) : '-'}</td>
                 <td>{r.status === 'ended' ? reasonLabel[r.endReason ?? ''] ?? r.endReason : '-'}</td>
@@ -87,12 +87,14 @@ function Compare({ a, b, topic }: { a: RunDetail; b: RunDetail; topic: (r: Run) 
       ['시도별 타임아웃', n((d) => d.run.settings.callTimeoutMs, (v) => `${v}ms`)], ['최대 시도', n((d) => d.run.settings.maxAttempts)],
       ['재시도 대기', n((d) => d.run.settings.backoffMs, (v) => `${v}ms`)], ['요청자 타임아웃', n((d) => d.run.settings.clientTimeoutMs, (v) => `${v}ms`)],
       ['B 처리 시간', n((d) => d.run.settings.workMs, (v) => `${v}ms`)], ['인증 결과 기억', n((d) => d.run.settings.authCacheSec ?? 0, (v) => `${v}초`)],
-      ['결제 멱등 키', t((d) => (d.run.settings.idempotent ? '붙임' : '안 붙임'))], ['적용한 장애', t(faults)],
+      ['결제 멱등 키', t((d) => (d.run.settings.idempotent ? '붙임' : '안 붙임'))],
+      ['서킷 브레이커', t((d) => (d.run.settings.breakerSec ? `${d.run.settings.breakerSec}초` : '끔'))], ['동시 호출 제한', t((d) => (d.run.settings.maxConcurrent ? `${d.run.settings.maxConcurrent}개` : '끔'))],
+      ['대체 응답', t((d) => (d.run.settings.fallback ? '켬' : '끔'))], ['재시도 대기 늘리기', t((d) => (d.run.settings.backoffGrow ? '켬' : '끔'))], ['적용한 장애', t(faults)],
     ]],
     ['결과', [
       ['요청 수', n((d) => d.run.summary.total)], ['실패', n((d) => d.run.summary.failed)], ['실패율 (취소 제외)', t(rate)], ['취소', n((d) => d.run.summary.canceled)],
       ['응답 p50', n((d) => d.run.summary.p50Us, ms)], ['응답 p95', n((d) => d.run.summary.p95Us, ms)], ['응답 최대', n((d) => d.run.summary.maxUs, ms)],
-      ['서비스 간 호출', n((d) => d.run.summary.attempts)], ['재시도', n((d) => d.run.summary.retries)], ['호출 타임아웃', n((d) => d.run.summary.callTimeouts)],
+      ['임시 접수', n((d) => d.run.summary.degraded ?? 0)], ['서비스 간 호출', n((d) => d.run.summary.attempts)], ['부르지 않은 호출', n((d) => d.run.summary.skipped ?? 0)], ['재시도', n((d) => d.run.summary.retries)], ['호출 타임아웃', n((d) => d.run.summary.callTimeouts)],
       ['장애 제거 후 첫 성공', t(rec)], ['관측 누락 / 판단 불가', n((d) => d.run.summary.obsIncomplete)],
     ]],
   ]

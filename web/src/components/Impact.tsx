@@ -1,33 +1,37 @@
 // 손님 화면: 실제 요청 하나를 주문하는 손님 한 명으로 보여 준다. 숫자는 모두 관측값이며 만들어 내지 않는다.
-import { Ban, CircleCheck, CircleX, Lightbulb, ListTree, LoaderCircle, UserRound } from 'lucide-react'
+import { Ban, CircleCheck, CircleDashed, CircleX, Lightbulb, ListTree, LoaderCircle, UserRound } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { charges, notified, queued, story, waited } from '../explain'
+import { charges, degraded, notified, queued, story, waited } from '../explain'
 import { Badge, faultText, human, resultLabel } from '../format'
 import type { Fault, Run, Scenario, Trace } from '../types'
 
 interface Props { traces: Trace[]; faults: Fault[]; run: Run | null; scenario: Scenario; nowUs: number; live: boolean; focusId: string | null; onFocus: (id: string | null) => void; onOpen: (id: string) => void }
 
 const failed = (t: Trace) => t.endUs > 0 && t.result !== 'ok' && t.result !== 'canceled'
+// 일부 단계를 건너뛰고 임시로 접수된 요청. 성공도 실패도 아니어서 따로 센다.
+const soft = (t: Trace) => t.result === 'ok' && degraded(t).length > 0
+const toneOf = (t: Trace) => (t.result === 'running' ? 'live' : soft(t) ? 'warn' : t.result === 'ok' ? 'ok' : t.result === 'canceled' ? 'mute' : 'bad')
 
 export function Impact({ traces, faults, run, scenario, nowUs, live, focusId, onFocus, onOpen }: Props) {
   if (!traces.length) return <div className="empty">아직 손님이 없습니다. 실험을 시작하고 요청을 보내면, 요청 하나가 주문하는 손님 한 명으로 나타납니다.</div>
   const shown = traces.find((t) => t.traceId === focusId) ?? [...traces].reverse().find((t) => t.endUs > 0) ?? traces[traces.length - 1]
   return (
     <div className="impact">
-      <Crowd traces={traces} scenario={scenario} nowUs={nowUs} pickedId={shown.traceId} onFocus={onFocus} />
+      <Crowd traces={traces} scenario={scenario} fallback={!!run?.settings.fallback} nowUs={nowUs} pickedId={shown.traceId} onFocus={onFocus} />
       <Incident traces={traces} faults={faults} run={run} nowUs={nowUs} live={live} pickedId={shown.traceId} onFocus={onFocus} />
       <Told t={shown} nowUs={nowUs} onOpen={onOpen} />
     </div>
   )
 }
 
-function Crowd({ traces, scenario, nowUs, pickedId, onFocus }: { traces: Trace[]; scenario: Scenario; nowUs: number; pickedId: string; onFocus: (id: string) => void }) {
+function Crowd({ traces, scenario, fallback, nowUs, pickedId, onFocus }: { traces: Trace[]; scenario: Scenario; fallback: boolean; nowUs: number; pickedId: string; onFocus: (id: string) => void }) {
   const done = traces.filter((t) => t.endUs > 0 && t.result !== 'canceled')
   const bad = done.filter(failed).length
   const waiting = traces.filter((t) => t.result === 'running').length
   const times = done.map((t) => t.endUs - t.startUs)
   const has = (id: string) => scenario.nodes.some((n) => n.id === id)
-  const good = done.length - bad
+  const held = done.filter(soft).length
+  const good = done.length - bad - held
   // 손님 눈에는 보이지 않는 피해. 모두 관측된 span에서 센다.
   const paid = traces.reduce((n, t) => n + charges(t), 0)
   const unsent = traces.filter((t) => queued(t) && !notified(t)).length
@@ -37,6 +41,7 @@ function Crowd({ traces, scenario, nowUs, pickedId, onFocus }: { traces: Trace[]
       <div className="tiles">
         <div className={waiting ? 'tile tone-live' : 'tile'}><b>{waiting}</b><span>대기 중</span></div>
         <div className="tile tone-ok"><b>{good}</b><span>{verb} 완료</span></div>
+        {(fallback || held > 0) && <div className={held ? 'tile tone-warn' : 'tile'}><b>{held}</b><span>임시 접수</span></div>}
         <div className={bad ? 'tile tone-bad' : 'tile'}><b>{bad}</b><span>{verb} 실패</span></div>
         {has('pay') && <div className={paid > good ? 'tile tone-bad' : 'tile tone-ok'}><b>{paid}</b><span>실제 결제</span></div>}
         {has('queue') && <div className={unsent ? 'tile tone-bad' : 'tile'}><b>{unsent}</b><span>알림 밀림</span></div>}
@@ -49,14 +54,14 @@ function Crowd({ traces, scenario, nowUs, pickedId, onFocus }: { traces: Trace[]
       <ul className="people">
         {[...traces].reverse().slice(0, 60).map((t) => {
           const run = t.result === 'running'
-          const tone = run ? 'live' : t.result === 'ok' ? 'ok' : t.result === 'canceled' ? 'mute' : 'bad'
-          const Icon = run ? LoaderCircle : t.result === 'ok' ? CircleCheck : t.result === 'canceled' ? Ban : CircleX
+          const tone = toneOf(t)
+          const Icon = run ? LoaderCircle : soft(t) ? CircleDashed : t.result === 'ok' ? CircleCheck : t.result === 'canceled' ? Ban : CircleX
           return (
             <li key={t.traceId}>
               <button className={`person tone-${tone} ${t.traceId === pickedId ? 'sel' : ''}`} onClick={() => onFocus(t.traceId)} aria-label={`${t.seq}번 손님 ${resultLabel[t.result].text}`}>
                 <UserRound size={15} aria-hidden /><b>#{t.seq}</b>
                 <Icon size={13} className={run ? 'spin' : ''} aria-hidden />
-                <span>{run ? `${human(waited(t, nowUs))}째` : t.result === 'canceled' ? '취소' : t.result === 'ok' ? human(waited(t, nowUs)) : `${human(waited(t, nowUs))} 실패`}</span>
+                <span>{run ? `${human(waited(t, nowUs))}째` : t.result === 'canceled' ? '취소' : soft(t) ? `${human(waited(t, nowUs))} 임시` : t.result === 'ok' ? human(waited(t, nowUs)) : `${human(waited(t, nowUs))} 실패`}</span>
               </button>
             </li>
           )
@@ -126,21 +131,21 @@ function Incident({ traces, faults, run, nowUs, live, pickedId, onFocus }: { tra
           {limit <= top && <g><path className="limit" d={`M${m.l} ${y(limit)}H${W - m.r}`} /><text className="ax halo" x={m.l + 4} y={y(limit) - 4}>A가 다른 서비스를 기다리는 한도 {human(limit)}</text></g>}
           {traces.map((t) => {
             const run = t.result === 'running'
-            const tone = run ? 'live' : t.result === 'ok' ? 'ok' : t.result === 'canceled' ? 'mute' : 'bad'
+            const tone = toneOf(t)
             const px = x(t.startUs)
             const py = y(waited(t, nowUs))
             return (
               <g key={t.traceId} className={`mark tone-${tone} ${t.traceId === pickedId ? 'sel' : ''}`} onClick={() => onFocus(t.traceId)}>
                 <title>{`${t.seq}번 손님: ${resultLabel[t.result].text}, ${human(waited(t, nowUs))}`}</title>
                 <path d={`M${px} ${H - m.b}V${py}`} />
-                {failed(t) ? <path className="x" d={`M${px - 4} ${py - 4}l8 8M${px + 4} ${py - 4}l-8 8`} /> : <circle cx={px} cy={py} r={run ? 3 : 3.5} />}
+                {failed(t) ? <path className="x" d={`M${px - 4} ${py - 4}l8 8M${px + 4} ${py - 4}l-8 8`} /> : <circle className={soft(t) ? 'hollow' : ''} cx={px} cy={py} r={run ? 3 : 3.5} />}
                 <rect className="hit" x={px - 5} y={m.t} width="10" height={H - m.t - m.b} />
               </g>
             )
           })}
         </svg>
       </div>
-      <p className="note">동그라미는 성공, 가위표는 실패입니다. 보라색 구간은 장애가 걸려 있던 시간입니다.</p>
+      <p className="note">동그라미는 성공, 빈 동그라미는 임시 접수, 가위표는 실패입니다. 보라색 구간은 장애가 걸려 있던 시간입니다.</p>
     </section>
   )
 }

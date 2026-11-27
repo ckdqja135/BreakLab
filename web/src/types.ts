@@ -6,6 +6,7 @@ export type Route = 'proxied' | 'proxy_side' | 'proxy_dial' | 'bypassed' | 'unde
 export interface Settings {
   clientTimeoutMs: number; callTimeoutMs: number; maxAttempts: number; backoffMs: number; workMs: number
   authCacheSec: number; idempotent: boolean
+  breakerSec: number; maxConcurrent: number; fallback: boolean; backoffGrow: boolean // A의 방어 장치
 }
 export interface Limits {
   maxInFlight: number; maxRequestsPerRun: number; maxRepeatCount: number; minIntervalMs: number; maxIntervalMs: number
@@ -35,7 +36,7 @@ export interface Fault extends FaultInput {
 }
 export interface Summary {
   total: number; ok: number; failed: number; canceled: number; inFlight: number; p50Us: number; p95Us: number; maxUs: number
-  attempts: number; retries: number; callTimeouts: number; obsIncomplete: number
+  attempts: number; retries: number; callTimeouts: number; obsIncomplete: number; degraded?: number; skipped?: number
 }
 export interface Run {
   id: string; scenario?: string; label: string; startedUs: number; endedUs: number; limitSec: number; status: 'running' | 'ending' | 'ended'

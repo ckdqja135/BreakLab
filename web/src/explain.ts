@@ -22,6 +22,10 @@ export const charges = (t: Trace) => t.spans.filter((s) => s.service === 'pay' &
 // 알림이 작업자에게 넘어가 처리됐는지
 export const notified = (t: Trace) => t.spans.some((s) => s.service === 'worker' && s.kind === 'server' && s.result === 'ok')
 export const queued = (t: Trace) => attempts(t, 'a-queue').some((a) => a.call.result === 'ok')
+// 일부 단계를 건너뛰고 임시로 접수한 요청인지. 건너뛴 서비스 ID를 돌려준다.
+export const degraded = (t: Trace) => (t.spans.find((s) => s.service === 'service-a' && s.kind === 'server')?.attrs?.['lab.degraded'] ?? '').split(',').filter(Boolean)
+// A가 스스로 부르지 않은 호출
+export const skipped = (t: Trace) => (t.spans.find((s) => s.service === 'service-a' && s.kind === 'server')?.events ?? []).filter((e) => e.name === '호출 생략')
 export const queueMs = (a: Attempt) => Number(a.peer?.attrs?.['lab.queue_ms'] ?? 0)
 export const waited = (t: Trace, nowUs: number) => (t.endUs || nowUs) - t.startUs
 
@@ -91,16 +95,25 @@ export function story(t: Trace, nowUs: number): Story {
   })
   for (const e of a?.events ?? []) {
     if (e.name === '인증 결과 재사용') steps.push({ at: e.atUs, run: () => lines.push({ tone: 'ok', text: 'A는 조금 전에 확인해 둔 인증 결과를 다시 썼습니다. 인증을 부르지 않았습니다.', atUs: e.atUs }) })
+    const to = meta(e.attrs?.to)
+    if (e.name === '호출 생략') steps.push({ at: e.atUs, run: () => lines.push({ tone: 'warn', atUs: e.atUs, text: e.attrs?.why === '서킷 열림'
+      ? `A는 ${to.obj} 부르지 않았습니다. ${to.subj} 연달아 실패해서 잠시 부르기를 쉬는 중입니다(서킷 브레이커).`
+      : `A는 ${to.obj} 부르지 않고 바로 거절했습니다. 이미 한도만큼의 요청이 ${to.short}의 답을 기다리고 있었습니다(동시 호출 제한).` }) })
+    if (e.name === '대체 응답') steps.push({ at: e.atUs + 1, run: () => lines.push({ tone: 'warn', atUs: e.atUs, text: `A는 ${to.short} 없이 임시로 접수하기로 했습니다(대체 응답).` }) })
     if (e.name.startsWith('캐시를 쓸 수 없어')) steps.push({ at: e.atUs, run: () => lines.push({ tone: 'warn', text: '캐시를 쓸 수 없어 DB에서 직접 읽습니다.', atUs: e.atUs }) })
   }
   steps.sort((x, y) => x.at - y.at).forEach((s) => s.run())
 
   const sum = human(waited(t, nowUs))
+  const soft = degraded(t)
   const did = product ? '상품 화면' : '주문 완료 화면'
   let verdict: Line
   switch (t.result) {
     case 'running': verdict = { tone: 'plain', text: `손님은 ${sum}째 기다리는 중입니다.` }; break
-    case 'ok': verdict = { tone: 'ok', text: `손님은 ${sum} 만에 ${did}을 봤습니다.` }; break
+    case 'ok': verdict = !soft.length ? { tone: 'ok', text: `손님은 ${sum} 만에 ${did}을 봤습니다.` }
+      : product ? { tone: 'warn', text: `손님은 ${sum} 만에 기본 상품 정보를 봤습니다. 최신 정보는 아니지만 화면은 나왔습니다.` }
+      : { tone: 'warn', text: `손님은 ${sum} 만에 '주문 접수, 확인 중' 화면을 봤습니다. 실패는 아니지만 건너뛴 일(${soft.map((id) => meta(id).short).join(', ')})은 나중에 다시 처리해야 합니다.` }
+      break
     case 'http_error': verdict = { tone: 'bad', text: `손님은 ${sum}를 기다린 끝에 오류 화면(HTTP ${t.httpStatus})을 봤습니다.` }; break
     case 'timeout': verdict = { tone: 'bad', text: `손님은 ${sum}를 기다리다 포기했습니다. 요청자 타임아웃입니다.` }; break
     case 'canceled': verdict = { tone: 'plain', text: '실험 중지로 이 요청은 취소되었습니다.' }; break
@@ -148,6 +161,10 @@ export function story(t: Trace, nowUs: number): Story {
   if (failed && done.filter((c) => c.result === 'http_error').length > 1 && all(['http_error'])) insights.push(`${lastTo.subj} 계속 오류로 답해서 재시도도 소용없었습니다.`)
   const slow = calls.map((c) => ({ c, q: queueMs({ call: c, peer: peerOf(t, c) }) })).sort((x, y) => y.q - x.q)[0]
   if (slow && slow.q >= 100) insights.push(`${meta(EDGE_TO[slow.c.edge ?? '']).short} 안에서 줄을 서는 데만 ${human(slow.q * 1000)}가 걸렸습니다. 처리 속도보다 기다린 시간이 문제였습니다.`)
+  const skips = skipped(t)
+  if (skips.some((e) => e.attrs?.why === '서킷 열림')) insights.push(`서킷이 열려 있어 손님은 기다리지 않고 바로 결과를 받았습니다. 쉬는 동안 ${meta(skips[0].attrs?.to).topic} 요청을 받지 않아 회복할 틈을 얻습니다.`)
+  if (skips.some((e) => e.attrs?.why === '동시 호출 제한')) insights.push('받을 수 있는 만큼만 받고 나머지는 바로 거절했습니다. 다 받으려다 모두 느려지는 것보다, 일부라도 제대로 처리하는 쪽을 택한 것입니다.')
+  if (soft.length) insights.push('일부 기능을 포기하고 응답을 지켰습니다. 무엇을 건너뛰어도 되는지는 일의 성격에 달렸습니다. 인증처럼 건너뛰면 안 되는 일도 있습니다.')
   if (t.result === 'ok' && queued(t) && !okHand) insights.push('손님은 주문을 마쳤지만 알림은 아직 나가지 않았습니다. 손님 눈에는 장애가 보이지 않습니다.')
   return { lines, verdict, after, insights }
 }

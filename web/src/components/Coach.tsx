@@ -31,7 +31,7 @@ export interface CoachState {
   burst: Burst | null
 }
 
-export function useCoach(base: Omit<Ctx, 'lessonUs' | 'sinceUs' | 'topic'> | null, nowUs: number, onStart: (l: Lesson) => void): CoachState {
+export function useCoach(base: Omit<Ctx, 'lessonUs' | 'sinceUs' | 'topic'> | null, nowUs: number, onStart: (l: Lesson, step?: Step) => void): CoachState {
   const [saved, setSaved] = useState(load)
   const [course, setCourse] = useState<Course | null>(null)
   useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(saved)) } catch { /* 저장하지 못해도 이번 접속에서는 쓸 수 있다 */ } }, [saved])
@@ -50,10 +50,15 @@ export function useCoach(base: Omit<Ctx, 'lessonUs' | 'sinceUs' | 'topic'> | nul
     if (step.done(ctx)) { advance(step.saw?.(ctx)); return }
     // 장애가 자동 해제됐으면 적용 단계로 돌아간다.
     if (step.under && !active(ctx, step.under)) {
-      const back = course.lesson.steps.findIndex((s) => s.fault === step.under)
-      if (back >= 0 && back < course.step) setCourse({ ...course, step: back, sinceUs: nowUs })
+      let back = course.step - 1
+      while (back >= 0 && course.lesson.steps[back].fault !== step.under) back--
+      if (back >= 0) setCourse({ ...course, step: back, sinceUs: nowUs })
     }
   })
+
+  // 조건을 바꿔 다시 시작하는 단계에 들어서면 그 조건을 실험 조건 칸에 채운다.
+  const at = course && step?.settings ? `${course.lesson.id}:${course.step}` : ''
+  useEffect(() => { if (at && course && step) onStart(course.lesson, step) }, [at])
 
   const say = (v: Step['do'] | undefined) => (v === undefined || !ctx ? '' : typeof v === 'function' ? v(ctx) : v)
   const on = saved.open && !!step
@@ -71,6 +76,18 @@ export function useCoach(base: Omit<Ctx, 'lessonUs' | 'sinceUs' | 'topic'> | nul
   }
 }
 
+// 과정을 묶음별로 나눈다. 묶음 이름이 따로 없으면 주제 이름을 쓴다.
+function groups(topics: Scenario[]): [string, Lesson[]][] {
+  const out: [string, Lesson[]][] = []
+  for (const l of LESSONS) {
+    const name = l.group ?? topics.find((t) => t.id === l.topic)?.name ?? l.topic
+    const g = out.find((x) => x[0] === name)
+    if (g) g[1].push(l)
+    else out.push([name, [l]])
+  }
+  return out
+}
+
 export function Coach({ c, topics }: { c: CoachState; topics: Scenario[] }) {
   const close = <button className="icon" aria-label="학습 과정 닫기" onClick={() => c.setOpen(false)}><X size={15} /></button>
   if (!c.course) {
@@ -79,11 +96,11 @@ export function Coach({ c, topics }: { c: CoachState; topics: Scenario[] }) {
         <header><GraduationCap size={17} aria-hidden /><b>학습 과정</b><span className="grow" />{close}</header>
         <div className="coachbody">
           <p className="lead">장애를 직접 일으키며 하나씩 배웁니다. 처음이라면 1번부터 해 보세요.</p>
-          {topics.map((tp) => (
-            <section key={tp.id}>
-              <h4>{tp.name}</h4>
+          {groups(topics).map(([name, list]) => (
+            <section key={name}>
+              <h4>{name}</h4>
               <ol className="lessons">
-                {LESSONS.filter((l) => l.topic === tp.id).map((l) => (
+                {list.map((l) => (
                   <li key={l.id}>
                     <button onClick={() => c.start(l)}>
                       <i className={c.done.includes(l.id) ? 'done' : ''}>{c.done.includes(l.id) ? <Check size={14} aria-label="마침" /> : LESSONS.indexOf(l) + 1}</i>

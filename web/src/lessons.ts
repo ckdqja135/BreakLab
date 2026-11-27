@@ -1,5 +1,5 @@
 // 학습 과정. 단계의 완료 여부와 관찰 문장은 모두 실제 실험 상태와 관측값으로 판단한다.
-import { attempts, charges, handled, notified, queued, waited } from './explain'
+import { attempts, charges, degraded, handled, notified, queued, waited } from './explain'
 import { human } from './format'
 import { EDGE_FROM, EDGE_TO, meta } from './meta'
 import type { FaultInput, LabState, Selection, Settings, Trace } from './types'
@@ -24,10 +24,11 @@ export interface Step {
   under?: FaultInput     // 이 장애가 걸려 있어야 하는 단계. 풀렸으면 적용 단계로 돌아간다
   burst?: Burst          // 반복 요청 칸에 채워 줄 값
   manual?: boolean       // 읽고 직접 넘기는 단계
+  settings?: Partial<Settings> // 이 단계부터 바뀌는 실험 조건. 실험을 새로 시작한다
   done: (c: Ctx) => boolean
   saw?: (c: Ctx) => string
 }
-export interface Lesson { id: string; topic: string; title: string; goal: string; settings?: Partial<Settings>; steps: Step[]; learned: string[] }
+export interface Lesson { id: string; topic: string; group?: string; title: string; goal: string; settings?: Partial<Settings>; steps: Step[]; learned: string[] }
 
 const TTL = 240
 const running = (c: Ctx) => c.live.run?.status === 'running'
@@ -53,6 +54,15 @@ const begin: Step = {
   why: '실험을 시작해야 요청과 장애를 보낼 수 있습니다. 주제와 조건은 이 과정에 맞게 맞춰 두었습니다.',
   done: mine,
 }
+
+// rerun은 조건을 바꿔 실험을 새로 시작하게 한다. 같은 장애를 조건만 바꿔 다시 겪어 보기 위한 단계다.
+const renewed = (c: Ctx) => running(c) && c.live.run!.startedUs >= c.sinceUs && (c.live.run!.scenario || 'stock') === c.topic
+const rerun = (settings: Partial<Settings>, what: string, why: string): Step => ({
+  do: (c) => (running(c) && !renewed(c) ? "위쪽 '실험 종료'를 누르세요. 조건을 바꿔 다시 시작합니다." : `위쪽 파란 '실험 시작'을 누르세요. ${what}`),
+  hint: (c) => (running(c) && !renewed(c) ? 'end' : 'start'),
+  why, settings,
+  done: renewed,
+})
 
 const apply = (f: FaultInput, values: string, why: string): Step => ({
   do: (c) => (picked(c, f) ? `오른쪽에 ${values} 값을 채워 두었습니다. 보라색 '장애 적용'을 누르세요.` : where(f)),
@@ -330,5 +340,85 @@ LESSONS.push(
       },
     ],
     learned: ['큐는 뒤쪽 서비스의 장애로부터 앞쪽을 지켜 줍니다. 작업자가 죽어도 주문은 됩니다.', '대신 장애가 눈에 보이지 않게 됩니다. 큐 길이와 가장 오래된 작업의 나이를 지켜봐야 합니다.', '복구는 작업자가 살아난 순간이 아니라 밀린 일이 다 빠진 순간입니다.'],
+  },
+)
+
+const cutPay: FaultInput = { edge: 'a-pay', type: 'cut', ttlSec: TTL }
+const few: Burst = { count: 8, intervalMs: 300, concurrency: 2 }
+const six: Burst = { count: 6, intervalMs: 200, concurrency: 2 }
+const quick = (ts: Trace[]) => ts.filter((t) => waited(t, 0) < 100e3)
+const calls = (ts: Trace[], edge: string) => ts.reduce((n, t) => n + attempts(t, edge).length, 0)
+const held = (ts: Trace[]) => ts.filter((t) => t.result === 'ok' && degraded(t).length > 0).length
+
+LESSONS.push(
+  {
+    id: 'breaker', topic: 'stock', group: '방어 장치', title: '서킷 브레이커: 빨리 포기하기', goal: '고장 난 서비스를 계속 두드리지 않게 하는 장치를 봅니다.', settings: { maxAttempts: 1 },
+    steps: [
+      begin,
+      apply(silent, '응답 없음', 'B가 답하지 않는 상황을 만듭니다. A는 부를 때마다 1000ms를 기다립니다.'),
+      many(few, '먼저 방어 장치 없이 손님 8명을 보냅니다.',
+        (ts) => `손님 ${ts.length}명이 모두 ${longest(ts)} 가까이 기다린 뒤 실패했습니다. A는 답 없는 B를 ${calls(ts, 'a-b')}번 불러 매번 끝까지 기다렸습니다.`, silent),
+      rerun({ breakerSec: 5 }, '이번에는 서킷 브레이커를 켠 조건입니다.', '서킷 브레이커는 한 서비스가 연달아 3번 실패하면 5초 동안 그 서비스를 부르지 않습니다. 두꺼비집이 내려가는 것과 같습니다.'),
+      apply(silent, '응답 없음', '아까와 같은 장애를 겁니다.'),
+      many(few, '같은 손님 8명을 보냅니다.', (ts) => {
+        const fast = quick(ts)
+        return `처음 ${ts.length - fast.length}명은 여전히 1초쯤 기다렸지만, 그 뒤 ${fast.length}명은 ${fast.length ? longest(fast) : '-'} 안에 결과를 받았습니다. A가 B를 ${calls(ts, 'a-b')}번만 불렀기 때문입니다.`
+      }, silent),
+      read("그림의 Service A 상자에 '서킷 열림'이 보이는지 확인하세요.", '손님은 여전히 실패를 보지만 기다리지 않습니다. 그리고 B는 그동안 요청을 받지 않아 회복할 틈을 얻습니다.', 'service-a'),
+      remove(silent, 'B를 되살립니다. 서킷은 바로 닫히지 않습니다.'),
+      {
+        do: "5초쯤 기다린 뒤 '요청 1회'를 누르세요. 실패하면 조금 뒤에 다시 누르세요.", hint: 'send',
+        why: '쉬는 시간이 지나면 A는 시험 삼아 딱 한 번 불러 봅니다. 성공하면 다시 평소대로 부릅니다.',
+        done: (c) => fresh(c).some((t) => t.result === 'ok'),
+        saw: (c) => `쉬는 시간이 지나자 A가 B를 한 번 불러 봤고 ${took(fresh(c).filter((t) => t.result === 'ok').pop()!)} 만에 성공했습니다. 서킷이 닫혀 다시 정상입니다.`,
+      },
+    ],
+    learned: [
+      '서킷 브레이커는 고장 난 서비스를 계속 두드리지 않게 합니다. 손님은 빨리 결과를 알고, 고장 난 쪽은 쉴 수 있습니다.',
+      '실패 자체를 없애지는 못합니다. 대체 응답과 함께 쓰면 실패를 임시 접수로 바꿀 수 있습니다.',
+      '너무 민감하면 멀쩡한 서비스도 끊고, 너무 둔하면 소용이 없습니다. 몇 번 실패에 열고 얼마나 쉴지가 조절할 곳입니다.',
+    ],
+  },
+  {
+    id: 'soften', topic: 'pay', group: '방어 장치', title: '대체 응답: 실패 대신 임시 접수', goal: '일부 기능을 포기하고 응답을 지키는 방법을 봅니다.', settings: { maxAttempts: 1 },
+    steps: [
+      begin,
+      apply(cutPay, '연결 차단', '결제사로 가는 길을 끊습니다. 재고(B)는 멀쩡합니다.'),
+      many(six, '먼저 방어 장치 없이 손님 6명을 보냅니다.',
+        (ts) => `재고는 있는데도 손님 ${ts.length}명 중 ${ts.filter(bad).length}명이 주문에 실패했습니다. 결제가 안 되면 주문 전체를 실패로 돌리기 때문입니다.`, cutPay),
+      rerun({ fallback: true }, '이번에는 대체 응답을 켠 조건입니다.', '대체 응답은 어떤 단계가 실패하면 그 단계만 건너뛰고 주문을 임시로 접수합니다. 건너뛴 결제는 나중에 다시 요청해야 합니다.'),
+      apply(cutPay, '연결 차단', '아까와 같은 장애를 겁니다.'),
+      many(six, '같은 손님 6명을 보냅니다.',
+        (ts) => `이번에는 손님 ${ts.length}명 중 ${held(ts)}명이 임시 접수로 응답을 받았고, 실패는 ${ts.filter(bad).length}명입니다. 손님은 오류 화면 대신 '주문 접수, 확인 중'을 봤습니다.`, cutPay),
+      read("아래 '손님 화면'에서 주황색 '임시' 손님을 눌러 풀이를 읽어 보세요.", '공짜는 아닙니다. 건너뛴 결제는 나중에 반드시 다시 처리해야 하고 그동안 재고가 묶입니다. 인증처럼 건너뛰면 안 되는 단계도 있습니다.', 'tab-impact'),
+      remove(cutPay, '장애를 없앱니다.'),
+    ],
+    learned: [
+      '전부 아니면 전무가 아닙니다. 일부 기능을 포기하고 응답을 지키는 방법이 있습니다.',
+      '무엇을 건너뛰어도 되는지는 일의 성격에 달렸습니다. 추천 목록은 빼도 되지만 인증은 뺄 수 없습니다.',
+      '건너뛴 일은 사라지지 않습니다. 나중에 처리할 방법까지 함께 마련해야 합니다.',
+    ],
+  },
+  {
+    id: 'shed', topic: 'stock', group: '방어 장치', title: '동시 호출 제한: 넘치면 빨리 거절하기', goal: '받을 수 있는 만큼만 받는 것이 왜 나은지 봅니다.', settings: { maxAttempts: 2, backoffMs: 200 },
+    steps: [
+      begin,
+      apply(jammed, '동시 처리 1개, 건당 600ms', 'B가 한 번에 하나만, 하나에 600ms씩 처리하게 합니다.'),
+      many(crowd, '먼저 방어 장치 없이 손님 10명을 보냅니다.',
+        (ts) => `손님 ${ts.length}명 중 ${ts.filter(bad).length}명이 실패했고, 가장 오래 기다린 손님은 ${longest(ts)}입니다. A는 힘들어하는 B를 ${calls(ts, 'a-b')}번 불렀습니다.`, jammed),
+      rerun({ maxConcurrent: 1 }, '이번에는 B에 동시에 보내는 호출을 1개로 제한한 조건입니다.', '동시 호출 제한은 이미 한도만큼 답을 기다리는 중이면, 새 요청을 B에 보내지 않고 바로 거절합니다.'),
+      apply(jammed, '동시 처리 1개, 건당 600ms', '아까와 같은 장애를 겁니다.'),
+      many(crowd, '같은 손님 10명을 보냅니다.', (ts) => {
+        const fast = quick(ts.filter(bad))
+        return `성공 ${ts.filter((t) => t.result === 'ok').length}명, 실패 ${ts.filter(bad).length}명입니다. 성공이 늘지는 않았습니다. 대신 가장 오래 기다린 손님이 ${longest(ts)}로 줄었고, A가 B를 부른 횟수도 ${calls(ts, 'a-b')}번으로 줄었습니다. 받지 못할 요청 ${fast.length}건은 ${fast.length ? longest(fast) : '-'} 안에 거절했습니다.`
+      }, jammed),
+      read("아래 '실행 이력과 비교' 탭에서 방금 두 실행을 골라 비교해 보세요.", '다 받으려다 모두 느려지는 것보다, 받을 수 있는 만큼만 받고 나머지는 빨리 거절하는 편이 낫습니다. 거절당한 손님도 2초를 기다리다 실패하는 것보다는 낫습니다.', 'tab-history'),
+      remove(jammed, '장애를 없앱니다.'),
+    ],
+    learned: [
+      '과부하에서는 요청을 다 받는 것이 친절이 아닙니다. 줄이 길어지면 모두가 느려지고 모두가 실패합니다.',
+      '한도를 넘는 요청을 빨리 거절하면, 받은 요청은 제대로 처리되고 느린 서비스는 무너지지 않습니다.',
+      '여기에 대체 응답을 더하면 거절 대신 임시 접수로 바꿀 수 있습니다.',
+    ],
   },
 )
