@@ -221,6 +221,13 @@ dl.inline { display: flex; flex-wrap: wrap; gap: 3px 16px; font-size: 12px; } dl
 /* 학습 과정 */
 .learn { margin-left: 12px; padding: 3px 10px; font-size: 12.5px; border-color: var(--coach); color: var(--coach-ink); }
 .coach { width: 340px; flex: none; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: #fffdf8; }
+.modes { display: flex; align-items: center; gap: 2px; padding: 0 6px 0 8px; border-bottom: 1px solid var(--line); flex: none; }
+.modes [role='tab'] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 7px 8px; font-size: 13px; font-weight: 500; color: var(--ink2); }
+.modes [aria-selected='true'] { border-bottom-color: var(--coach); color: var(--coach-ink); }
+.goals { display: grid; gap: 6px; } .goals li { display: flex; gap: 7px; font-size: 13px; line-height: 1.45; color: var(--ink2); } .goals li svg { flex: none; margin-top: 2px; }
+.goals li span { display: grid; color: var(--ink); } .goals small { color: inherit; font-weight: 600; } .goals .tone-ok small { color: var(--ok); } .goals .tone-bad small { color: var(--bad); }
+.running { display: flex; gap: 7px; align-items: center; font-size: 13px; font-weight: 500; color: var(--blue); }
+.coachbody > .primary { justify-self: start; } .hintbtn { justify-self: start; }
 .coach header { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line); color: var(--coach-ink); flex: none; }
 .coach header b { font-weight: 600; font-size: 13.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .coach .plain { padding: 2px 8px; font-size: 12px; }

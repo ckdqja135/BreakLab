@@ -1,5 +1,5 @@
 // 학습 과정 안내. 단계는 실제 실험 상태를 보고 스스로 넘어간다.
-import { Check, ChevronRight, CircleCheck, Eye, GraduationCap, X } from 'lucide-react'
+import { Check, ChevronRight, CircleCheck, Eye, GraduationCap } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { LESSONS, active, type Burst, type Ctx, type Lesson, type Step } from '../lessons'
 import type { FaultInput, Scenario } from '../types'
@@ -89,39 +89,35 @@ function groups(topics: Scenario[]): [string, Lesson[]][] {
 }
 
 export function Coach({ c, topics }: { c: CoachState; topics: Scenario[] }) {
-  const close = <button className="icon" aria-label="학습 과정 닫기" onClick={() => c.setOpen(false)}><X size={15} /></button>
   if (!c.course) {
     return (
-      <aside className="coach" aria-label="학습 과정">
-        <header><GraduationCap size={17} aria-hidden /><b>학습 과정</b><span className="grow" />{close}</header>
-        <div className="coachbody">
-          <p className="lead">장애를 직접 일으키며 하나씩 배웁니다. 처음이라면 1번부터 해 보세요.</p>
-          {groups(topics).map(([name, list]) => (
-            <section key={name}>
-              <h4>{name}</h4>
-              <ol className="lessons">
-                {list.map((l) => (
-                  <li key={l.id}>
-                    <button onClick={() => c.start(l)}>
-                      <i className={c.done.includes(l.id) ? 'done' : ''}>{c.done.includes(l.id) ? <Check size={14} aria-label="마침" /> : LESSONS.indexOf(l) + 1}</i>
-                      <span><b>{l.title}</b><small>{l.goal}</small></span>
-                      <ChevronRight size={15} aria-hidden />
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            </section>
-          ))}
-        </div>
-      </aside>
+      <div className="coachbody">
+        <p className="lead">장애를 직접 일으키며 하나씩 배웁니다. 처음이라면 1번부터 해 보세요.</p>
+        {groups(topics).map(([name, list]) => (
+          <section key={name}>
+            <h4>{name}</h4>
+            <ol className="lessons">
+              {list.map((l) => (
+                <li key={l.id}>
+                  <button onClick={() => c.start(l)}>
+                    <i className={c.done.includes(l.id) ? 'done' : ''}>{c.done.includes(l.id) ? <Check size={14} aria-label="마침" /> : LESSONS.indexOf(l) + 1}</i>
+                    <span><b>{l.title}</b><small>{l.goal}</small></span>
+                    <ChevronRight size={15} aria-hidden />
+                  </button>
+                </li>
+              ))}
+            </ol>
+          </section>
+        ))}
+      </div>
     )
   }
   const { lesson, step, notes, ended } = c.course
   const n = LESSONS.indexOf(lesson)
   const following = LESSONS[n + 1]
   return (
-    <aside className="coach" aria-label="학습 과정">
-      <header><GraduationCap size={17} aria-hidden /><b>{n + 1}. {lesson.title}</b><span className="grow" /><button className="plain" onClick={c.quit}>목록</button>{close}</header>
+    <>
+      <header><GraduationCap size={17} aria-hidden /><b>{n + 1}. {lesson.title}</b><span className="grow" /><button className="plain" onClick={c.quit}>목록</button></header>
       <div className="stepdots" aria-hidden>{lesson.steps.map((_, i) => <i key={i} className={ended || i < step ? 'done' : i === step ? 'now' : ''} />)}</div>
       <div className="coachbody">
         {ended ? (
@@ -130,7 +126,7 @@ export function Coach({ c, topics }: { c: CoachState; topics: Scenario[] }) {
             <ul>{lesson.learned.map((x) => <li key={x}><CircleCheck size={15} aria-hidden /><span>{x}</span></li>)}</ul>
             {following
               ? <button className="primary" onClick={() => c.start(following)}>다음: {following.title}<ChevronRight size={15} aria-hidden /></button>
-              : <p>모든 과정을 마쳤습니다. 이제 조건과 장애를 자유롭게 바꿔 가며 실험해 보세요.</p>}
+              : <p>모든 과정을 마쳤습니다. 이제 도전 과제에서 직접 조건을 맞춰 보세요.</p>}
           </div>
         ) : (
           <div className="todo">
@@ -147,6 +143,6 @@ export function Coach({ c, topics }: { c: CoachState; topics: Scenario[] }) {
           </>
         )}
       </div>
-    </aside>
+    </>
   )
 }

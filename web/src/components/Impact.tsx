@@ -34,6 +34,8 @@ function Crowd({ traces, scenario, fallback, nowUs, pickedId, onFocus }: { trace
   const good = done.length - bad - held
   // 손님 눈에는 보이지 않는 피해. 모두 관측된 span에서 센다.
   const paid = traces.reduce((n, t) => n + charges(t), 0)
+  // 헛된 결제: 주문은 실패했는데 결제된 것과, 한 주문에 두 번째부터 결제된 것
+  const wasted = traces.reduce((n, t) => n + (failed(t) ? charges(t) : Math.max(0, charges(t) - 1)), 0)
   const unsent = traces.filter((t) => queued(t) && !notified(t)).length
   const verb = has('cache') ? '조회' : '주문'
   return (
@@ -43,10 +45,10 @@ function Crowd({ traces, scenario, fallback, nowUs, pickedId, onFocus }: { trace
         <div className="tile tone-ok"><b>{good}</b><span>{verb} 완료</span></div>
         {(fallback || held > 0) && <div className={held ? 'tile tone-warn' : 'tile'}><b>{held}</b><span>임시 접수</span></div>}
         <div className={bad ? 'tile tone-bad' : 'tile'}><b>{bad}</b><span>{verb} 실패</span></div>
-        {has('pay') && <div className={paid > good ? 'tile tone-bad' : 'tile tone-ok'}><b>{paid}</b><span>실제 결제</span></div>}
+        {has('pay') && <div className={wasted ? 'tile tone-bad' : 'tile tone-ok'}><b>{paid}</b><span>실제 결제</span></div>}
         {has('queue') && <div className={unsent ? 'tile tone-bad' : 'tile'}><b>{unsent}</b><span>알림 밀림</span></div>}
       </div>
-      {has('pay') && paid > good && <p className="hidden-harm">완료된 주문은 {good}건인데 결제는 {paid}번 됐습니다. 손님 화면에는 보이지 않는 피해입니다.</p>}
+      {has('pay') && wasted > 0 && <p className="hidden-harm">결제 {paid}번 가운데 {wasted}번은 주문이 실패했거나 같은 주문에 두 번 결제된 것입니다. 손님 화면에는 보이지 않는 피해입니다.</p>}
       {has('queue') && unsent > 0 && <p className="hidden-harm">주문은 끝났지만 알림을 아직 못 받은 손님이 {unsent}명입니다. 손님 화면에는 보이지 않는 피해입니다.</p>}
       <p className="note">
         {done.length ? `손님 ${done.length}명이 평균 ${human(times.reduce((a, b) => a + b, 0) / times.length)} 기다렸고, 가장 오래 기다린 손님은 ${human(Math.max(...times))}입니다.` : '첫 손님이 기다리는 중입니다.'}
@@ -92,8 +94,8 @@ function nice(max: number, steps = [1, 2, 5, 10]): number {
 // 사고 그래프: 가로는 실험 시간, 세로는 손님이 기다린 시간. 보라색 띠는 장애가 걸려 있던 구간이다.
 function Incident({ traces, faults, run, nowUs, live, pickedId, onFocus }: { traces: Trace[]; faults: Fault[]; run: Run | null; nowUs: number; live: boolean; pickedId: string; onFocus: (id: string) => void }) {
   const [ref, W] = useWidth()
-  const H = 190
-  const m = { l: 44, r: 10, t: 30, b: 20 }
+  const H = 200
+  const m = { l: 44, r: 10, t: 42, b: 20 }
   const t0 = run?.startedUs ?? traces[0].startUs
   const last = Math.max(...traces.map((t) => t.endUs || t.startUs))
   const t1 = Math.max(live ? nowUs : run?.endedUs || last, last, t0 + 20e6)
@@ -124,7 +126,7 @@ function Incident({ traces, faults, run, nowUs, live, pickedId, onFocus }: { tra
             return (
               <g key={f.id}>
                 <rect className="fband" x={a} y={m.t - 4} width={Math.max(2, b - a)} height={H - m.b - m.t + 4} />
-                <text className="flabel" x={a + 3} y={10 + (i % 2) * 12}>{faultText(f)}</text>
+                <text className="flabel" x={a + 3} y={10 + (i % 3) * 12}>{faultText(f)}</text>
               </g>
             )
           })}

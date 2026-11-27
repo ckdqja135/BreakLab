@@ -1,4 +1,4 @@
-import { CirclePause, CirclePlay, CircleCheck, GraduationCap, History as HistoryIcon, ListTree, TriangleAlert, Undo2, UsersRound, X } from 'lucide-react'
+import { CirclePause, CirclePlay, CircleCheck, GraduationCap, History as HistoryIcon, ListTree, TriangleAlert, Trophy, Undo2, UsersRound, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { LiveAnimator } from './anim'
 import { api } from './api'
@@ -8,6 +8,8 @@ import { useLab, useNowUs } from './useLab'
 import { Calls } from './components/Calls'
 import { Coach, useCoach } from './components/Coach'
 import { Impact } from './components/Impact'
+import { QuestPanel, useQuest } from './components/Quest'
+import { QUESTS } from './quests'
 import { LESSONS, type Lesson } from './lessons'
 import { History } from './components/History'
 import { SidePanel } from './components/SidePanel'
@@ -30,6 +32,7 @@ export function App() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [label, setLabel] = useState('')
   const [limitSec, setLimitSec] = useState(600)
+  const [mode, setMode] = useState<'learn' | 'quest'>('learn') // 왼쪽 아래 칸에 보일 것
   const [topic, setTopic] = useState<string | null>(null) // 고른 실험 주제. 처음에는 마지막 실험의 주제를 따른다
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
@@ -53,6 +56,13 @@ export function App() {
     if (lab.live) setSettings({ ...lab.live.defaults, ...l.settings, ...again?.settings })
     setLabel(`학습 ${LESSONS.indexOf(l) + 1}. ${l.title}${again ? ' (방어 켬)' : ''}`)
   })
+
+  // 도전 과제를 고르면 주제를 맞추고 조건을 처음 값으로 돌린다. 여기서부터 사용자가 조건을 바꾼다.
+  const quest = useQuest(lab, settings, (q) => {
+    setPast(null); setFocusId(null); setReplaying(false); setPlayUs(null); setSelection(null); setTab('impact'); setTopic(q.topic)
+    if (lab.live) setSettings({ ...lab.live.defaults })
+  })
+  const hint = mode === 'learn' ? coach.hint : null
 
   const { live, shown } = lab
   if (!live || !shown || !settings || topic === null) return <div className="boot">{lab.connected ? '상태를 불러오는 중입니다.' : '관리 서버에 연결하는 중입니다. 서버가 실행 중인지 확인하세요.'}</div>
@@ -82,8 +92,8 @@ export function App() {
   })
 
   return (
-    <div className={tall ? 'app tall' : 'app'} data-coach={coach.hint ?? undefined}>
-      <TopBar live={live} connected={lab.connected} nowUs={nowUs} act={act} busy={busy} onStart={start} onEmergency={emergency} burst={coach.burst} />
+    <div className={tall ? 'app tall' : 'app'} data-coach={hint ?? undefined}>
+      <TopBar live={live} connected={lab.connected} nowUs={nowUs} act={act} busy={busy} onStart={start} onEmergency={emergency} burst={mode === 'learn' ? coach.burst : null} />
       <main className={past ? 'canvas pastview' : 'canvas'}>
         <div className="canvasbar">
           <button onClick={() => { animator.clear(); lab.setPaused(!lab.paused) }} aria-pressed={lab.paused}>
@@ -100,10 +110,20 @@ export function App() {
         <p className="caption">점 하나는 실제 호출 하나입니다. 빠른 호출은 보이도록 늦춰 그리므로 정확한 시간은 숫자와 타임라인을 보세요.</p>
       </main>
       <SidePanel live={live} traces={traces} faults={faults} past={!!past} selection={selection} onSelect={setSelection} settings={settings} setSettings={setSettings}
-        label={label} setLabel={setLabel} limitSec={limitSec} setLimitSec={setLimitSec} nowUs={nowUs} act={act} busy={busy} onTrace={pickTrace} preset={coach.fault}
+        label={label} setLabel={setLabel} limitSec={limitSec} setLimitSec={setLimitSec} nowUs={nowUs} act={act} busy={busy} onTrace={pickTrace} preset={mode === 'learn' ? coach.fault : null}
         scenario={scenario} setTopic={(id) => { setTopic(id); setSelection(null); closeFocus() }} />
       <section className="bottom">
-        {coach.open && <Coach c={coach} topics={topics} />}
+        {coach.open && (
+          <aside className="coach" aria-label="학습 과정과 도전 과제">
+            <div className="modes" role="tablist">
+              <button role="tab" aria-selected={mode === 'learn'} onClick={() => setMode('learn')}><GraduationCap size={15} aria-hidden />학습 과정</button>
+              <button role="tab" aria-selected={mode === 'quest'} onClick={() => setMode('quest')}><Trophy size={15} aria-hidden />도전 과제</button>
+              <span className="grow" />
+              <button className="icon" aria-label="닫기" onClick={() => coach.setOpen(false)}><X size={15} /></button>
+            </div>
+            {mode === 'learn' ? <Coach c={coach} topics={topics} /> : <QuestPanel q={quest} topics={topics} />}
+          </aside>
+        )}
         <div className="bottommain">
         <div className="tabs" role="tablist">
           <button role="tab" data-c="tab-impact" aria-selected={tab === 'impact'} onClick={() => setTab('impact')}><UsersRound size={15} aria-hidden />손님 화면</button>
@@ -111,7 +131,7 @@ export function App() {
           <button role="tab" data-c="tab-history" aria-selected={tab === 'history'} onClick={() => setTab('history')}><HistoryIcon size={15} aria-hidden />실행 이력과 비교</button>
           <span className="grow" />
           {tab !== 'history' && <Totals s={past ? past.run.summary : shown.run?.summary} />}
-          {!coach.open && <button className="learn" onClick={() => coach.setOpen(true)}><GraduationCap size={15} aria-hidden />학습 과정 {coach.done.length}/{LESSONS.length}</button>}
+          {!coach.open && <button className="learn" onClick={() => coach.setOpen(true)}><GraduationCap size={15} aria-hidden />학습 {coach.done.length}/{LESSONS.length}, 도전 {quest.passed.length}/{QUESTS.length}</button>}
         </div>
         {tab === 'impact' ? (
           <Impact traces={traces} faults={faults} run={past ? past.run : stale ? null : shown.run} scenario={scenario} nowUs={nowUs} live={!past && shown.run?.status === 'running'} focusId={focusId}

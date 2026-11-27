@@ -29,6 +29,7 @@ export interface Lab {
   behind: number
   offsetUs: number
   setPaused: (p: boolean) => void
+  peek: () => LabState | null // 지금 이 순간의 상태. 실행 도중 결과를 기다릴 때 쓴다
 }
 
 // onTrace는 실시간으로 도착한 관측만 받는다. 처음 불러온 상태는 애니메이션으로 만들지 않는다.
@@ -87,6 +88,7 @@ export function useLab(onTrace: (t: Trace) => void): Lab {
 
   return {
     live: live.current, shown: shown.current, connected, paused: paused.current, behind: behind.current, offsetUs: offset.current,
+    peek: () => live.current,
     setPaused: (p) => {
       paused.current = p
       behind.current = 0
